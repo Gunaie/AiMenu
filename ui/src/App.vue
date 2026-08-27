@@ -43,6 +43,17 @@
               :class="{ 'is-recommended': highlightedItems.includes(item.id.toString()) }"
               :id="'menu-' + item.id"
             >
+              <div class="menu-card-image" v-if="item.dish_name">
+                <el-image 
+                  :src="getDishImageUrl(item.dish_name)" 
+                  fit="cover"
+                  lazy
+                >
+                  <template #placeholder>
+                    <div class="image-slot">加载中...</div>
+                  </template>
+                </el-image>
+              </div>
               <div class="menu-card-header">
                 <span class="dish-name">{{ item.dish_name }}</span>
                 <span class="dish-price">¥{{ item.price }}</span>
@@ -366,6 +377,11 @@ export default {
       return ['', 'success', 'warning', 'danger'][level] || 'info'
     }
 
+    const getDishImageUrl = (name) => {
+      if (!name) return ''
+      return `https://core-normal.traeapi.us/api/ide/v1/text_to_image?prompt=${encodeURIComponent(name + ' 美味菜品 摄影风格 极简背景')}&image_size=square`
+    }
+
     onMounted(loadMenuItems)
 
     return {
@@ -373,7 +389,8 @@ export default {
       deliveryAddress, travelMode, deliveryResponse, deliveryLoading, showDeliveryInput,
       menuItems, menuLoading, highlightedItems, activeCategory, filteredMenu,
       sendChatQuery, checkDelivery, loadMenuItems, getSpiceType, renderMarkdown,
-      showCart, cart, cartCount, totalPrice, addToCart, addById, removeFromCart, checkout, getDishNameById
+      showCart, cart, cartCount, totalPrice, addToCart, addById, removeFromCart, checkout, getDishNameById,
+      getDishImageUrl
     }
   }
 }
@@ -453,22 +470,38 @@ body {
   background: #fff;
   border: 1px solid var(--border-color);
   border-radius: 8px;
-  padding: 15px;
+  padding: 0; /* 修改 padding */
   margin-bottom: 15px;
   transition: all 0.3s;
+  overflow: hidden; /* 裁剪图片圆角 */
 }
 
-.menu-card:hover {
-  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-  transform: translateY(-2px);
+.menu-card-image {
+  width: 100%;
+  height: 150px;
+  background: #f0f2f5;
 }
 
-.menu-card.is-recommended {
-  border-color: #f56c6c;
-  background: #fffbfa;
+.menu-card-image .el-image {
+  width: 100%;
+  height: 100%;
+}
+
+.image-slot {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100%;
+  color: var(--text-sec);
+  font-size: 12px;
+}
+
+.menu-card-header, .dish-desc, .dish-tags, .menu-card-footer {
+  padding: 0 15px;
 }
 
 .menu-card-header {
+  margin-top: 12px;
   display: flex;
   justify-content: space-between;
   margin-bottom: 8px;
