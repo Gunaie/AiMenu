@@ -203,23 +203,23 @@ class SmartRestaurantAssistant:
 
 
 
-    def  invoke(self,user_query:str):
-         """和小助手（Agent）聊天"""
+    def invoke(self, user_query: str):
+        """和小助手（Agent）聊天"""
 
-         # 1.分析用户的意图（找工具）
-         structured_tool=self.analyse_intention_with_retry(user_query)
+        # 1.分析用户的意图（找工具）
+        structured_tool = self.analyse_intention_with_retry(user_query)
 
-         # 1.1 获取工具的名字
-         tool_name=structured_tool['tool_name']
-         # 1.2 获取工具的参数
-         tool_param = structured_tool['format_query']
-         print(f"工具信息->名字:{tool_name}:参数:{tool_param}")
+        # 1.1 获取工具的名字
+        tool_name = structured_tool['tool_name']
+        # 1.2 获取工具的参数
+        tool_param = structured_tool['format_query']
+        logger.info(f"工具信息->名字:{tool_name}:参数:{tool_param}")
 
-         # 2.调用工具
-         tool_result=self.execute_tool(tool_name,tool_param)
+        # 2.调用工具
+        tool_result = self.execute_tool(tool_name, tool_param)
 
-         # 3.返回工具结果
-         return tool_result
+        # 3.返回工具结果
+        return tool_result
 
 
 
@@ -233,7 +233,6 @@ def chat_with_assistant(user_query:str):
         # 2.调用小助手的聊天方法
         assistant_response=assistant.invoke(user_query or  "介绍您们餐厅的基本信息")
 
-        print(f"小助手的回复:\n{assistant_response}")
         # 3.返回小助手的结果
         return assistant_response
     except Exception as e:

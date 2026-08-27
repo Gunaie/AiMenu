@@ -6,9 +6,7 @@
 2.2 POST /delivery - 配送查询接口
 2.3 GET /menu/list - 菜品列表接口
 """
-from http.client import HTTPException
-
-from  fastapi import  FastAPI
+from  fastapi import  FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List,Optional
 from smart_diancan.tools.amap_tool import PathInputModel
