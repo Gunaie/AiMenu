@@ -75,7 +75,13 @@ class ChromaVectorDB:
             return False
 
     def _embedding_content(self, content: str) -> List[float] or None:
-        """对文本进行向量化"""
+        """对文本进行向量化 (带缓存)"""
+        if not hasattr(self, '_embedding_cache'):
+            self._embedding_cache = {}
+        
+        if content in self._embedding_cache:
+            return self._embedding_cache[content]
+
         try:
             if not self.dashscope_api_key:
                 logger.error("dashscope api_key not found!")
@@ -89,7 +95,9 @@ class ChromaVectorDB:
             )
 
             if resp.status_code == HTTPStatus.OK:
-                return resp.get('output').get('embeddings')[0].get('embedding')
+                embedding = resp.get('output').get('embeddings')[0].get('embedding')
+                self._embedding_cache[content] = embedding
+                return embedding
             else:
                 logger.error(f"发送文本嵌入模型请求处理失败: {resp.message}")
                 return None
@@ -121,7 +129,7 @@ class ChromaVectorDB:
     def upsert_menu_data(self, menu_data: str = None, clear_existing: bool = True) -> bool:
         """将文本向量存储到ChromaDB向量数据库"""
         try:
-            from smart_diancan.tools.db_tool import get_all_menu_items
+            from tools.db_tool import get_all_menu_items
             if clear_existing:
                 self.clear_index_vectors()
             

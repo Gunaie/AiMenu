@@ -45,7 +45,7 @@
             >
               <div class="menu-card-image" v-if="item.dish_name">
                 <el-image 
-                  :src="getDishImageUrl(item.dish_name)" 
+                  :src="item.image_url || getDishImageUrl(item.dish_name)" 
                   fit="cover"
                   lazy
                 >
@@ -101,7 +101,12 @@
               </div>
               <div class="message-content-wrapper">
                 <div class="message-content">
-                  <div v-if="msg.role === 'assistant'" v-html="renderMarkdown(msg.content)" class="markdown-body"></div>
+                  <div v-if="msg.role === 'assistant'">
+                    <div v-if="msg.content === '' && chatLoading" class="loading-dots">
+                      <span>.</span><span>.</span><span>.</span>
+                    </div>
+                    <div v-else v-html="renderMarkdown(msg.content)" class="markdown-body"></div>
+                  </div>
                   <div v-else>{{ msg.content }}</div>
                 </div>
                 <!-- AI推荐菜品快捷添加 -->
@@ -111,13 +116,6 @@
                     <el-button type="primary" size="small" link @click="addById(dishId)">+ 加入</el-button>
                   </div>
                 </div>
-              </div>
-            </div>
-            
-            <div v-if="chatLoading" class="message assistant">
-              <div class="avatar"><el-icon><Service /></el-icon></div>
-              <div class="message-content loading-dots">
-                <span>.</span><span>.</span><span>.</span>
               </div>
             </div>
           </div>
@@ -205,7 +203,7 @@
 </template>
 
 <script>
-import { ref, onMounted, computed, nextTick, watch } from 'vue'
+import { ref, onMounted, computed, nextTick, watch, reactive } from 'vue'
 import { chatAPI, deliveryAPI, menuAPI } from './api/index.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -290,14 +288,28 @@ export default {
 
     const renderMarkdown = (text) => {
       if (!text) return ''
-      return text
+      // 简单 Markdown 渲染逻辑优化
+      let html = text
         .replace(/#{3} (.*?)$/gm, '<h3>$1</h3>')
         .replace(/#{2} (.*?)$/gm, '<h2>$1</h2>')
         .replace(/#{1} (.*?)$/gm, '<h1>$1</h1>')
         .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
         .replace(/^- (.*?)$/gm, '<li>$1</li>')
-        .replace(/(<li>.*?<\/li>)+/gs, '<ul>$&</ul>')
-        .replace(/\n/g, '<br/>')
+      
+      // 合并连续的 <li> 到 <ul>
+      html = html.replace(/(<li>.*?<\/li>\n?)+/gs, (match) => {
+        return `<ul>${match.trim()}</ul>`
+      })
+      
+      // 只有不在标签内部的换行才转为 <br/>
+      html = html.replace(/\n/g, '<br/>')
+
+      // 仅在正在生成的最新一条 AI 回复末尾添加光标
+      const lastMsg = chatHistory.value[chatHistory.value.length - 1]
+      if (chatLoading.value && lastMsg && lastMsg.role === 'assistant' && lastMsg.content === text) {
+        html += '<span class="cursor">|</span>'
+      }
+      return html
     }
 
     const highlightRecommendedItems = (menuIds) => {
@@ -320,7 +332,7 @@ export default {
       const query = chatQuery.value.trim()
       if (!query || chatLoading.value) return
 
-      chatHistory.value.push({ role: 'user', content: query })
+      chatHistory.value = [...chatHistory.value, { role: 'user', content: query }]
       chatQuery.value = ''
       chatLoading.value = true
 
@@ -330,15 +342,21 @@ export default {
         content: '', 
         menu_ids: [] 
       }
-      chatHistory.value.push(assistantMsg)
+      chatHistory.value = [...chatHistory.value, assistantMsg]
+      const assistantIndex = chatHistory.value.length - 1
 
       try {
         await chatAPI.sendMessageStream(query, sessionId.value, (chunk) => {
           if (chunk.type === 'content') {
-            assistantMsg.content += chunk.content
+            // 直接替换整个数组项，确保 Vue 3 完美触发渲染
+            const updatedMsg = { ...chatHistory.value[assistantIndex] }
+            updatedMsg.content += chunk.content
+            chatHistory.value[assistantIndex] = updatedMsg
           } else if (chunk.type === 'metadata') {
             if (chunk.menu_ids) {
-              assistantMsg.menu_ids = chunk.menu_ids
+              const updatedMsg = { ...chatHistory.value[assistantIndex] }
+              updatedMsg.menu_ids = chunk.menu_ids
+              chatHistory.value[assistantIndex] = updatedMsg
               highlightRecommendedItems(chunk.menu_ids)
             }
           }
@@ -379,7 +397,8 @@ export default {
 
     const getDishImageUrl = (name) => {
       if (!name) return ''
-      return `https://core-normal.traeapi.us/api/ide/v1/text_to_image?prompt=${encodeURIComponent(name + ' 美味菜品 摄影风格 极简背景')}&image_size=square`
+      // 使用本地图片路径，图片放在 public/images/ 目录下
+      return `/images/${name}.png`
     }
 
     onMounted(loadMenuItems)
@@ -618,10 +637,47 @@ body {
   border-bottom-left-radius: 2px;
 }
 
+.cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1.2em;
+  background-color: var(--primary-color);
+  margin-left: 2px;
+  animation: blink 1s infinite;
+  vertical-align: middle;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
 .message.user .message-content {
   background: var(--primary-color);
   color: white;
   border-bottom-right-radius: 2px;
+}
+
+.loading-dots {
+  display: flex;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.loading-dots span {
+  width: 6px;
+  height: 6px;
+  background-color: var(--primary-color);
+  border-radius: 50%;
+  animation: jump 1.4s infinite ease-in-out;
+}
+
+.loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+.loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes jump {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1.2); opacity: 1; }
 }
 
 .recommendation-quick-add {
@@ -715,3 +771,4 @@ body {
   margin-top: 20px;
   padding: 12px;
 }
+</style>

@@ -2,7 +2,7 @@
 智能点餐助手主程序 - 已升级为 LangGraph + Memory + Hybrid Search
 """
 import logging
-from smart_diancan.agent.langgraph_agent import restaurant_agent
+from agent.langgraph_agent import restaurant_agent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -13,13 +13,17 @@ async def chat_with_assistant_stream(user_query: str, session_id: str = "default
     """
     try:
         logger.info(f"开始流式对话: query='{user_query}', session='{session_id}'")
+        count = 0
         async for chunk in restaurant_agent.astream_run(user_query, thread_id=session_id):
+            if chunk.get("type") == "content":
+                count += 1
             yield chunk
+        logger.info(f"流式对话结束，共发送 {count} 个内容数据块")
     except Exception as e:
         logger.error(f"流式 Agent 执行异常: {e}")
         yield {"type": "error", "content": str(e)}
 
-def chat_with_assistant(user_query: str, session_id: str = "default"):
+async def chat_with_assistant(user_query: str, session_id: str = "default"):
     """
     和智能小助手对话 (已升级为 LangGraph 架构)
     
@@ -35,7 +39,7 @@ def chat_with_assistant(user_query: str, session_id: str = "default"):
         
         # 调用升级后的 LangGraph Agent
         # 它内部会自动处理意图分析、工具执行以及对话历史（Memory）
-        result = restaurant_agent.run(user_query, thread_id=session_id)
+        result = await restaurant_agent.run(user_query, thread_id=session_id)
         
         # 保持与旧版 API 的兼容性
         # 如果 Agent 返回了具体的菜品推荐 ID，则组装成旧版的字典格式

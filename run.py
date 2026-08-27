@@ -5,8 +5,13 @@
 """
 
 import  uvicorn
-
 import  logging
+import os
+import sys
+
+# 将当前目录添加到 PYTHONPATH
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 logging.basicConfig(level=logging.INFO)
 logger=logging.getLogger(__name__)
 

@@ -4,15 +4,16 @@ import logging
 from typing import Annotated, TypedDict, List, Dict, Any, Union
 
 from langchain_openai import ChatOpenAI
+from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.message import add_messages
 
 # 导入底层工具函数（直接使用逻辑函数，而不是包装好的tool）
-from smart_diancan.tools.chroma_tool import search_menu_items_with_ids
-from smart_diancan.tools.db_tool import get_all_menu_items
-from smart_diancan.tools.amap_tool import check_delivery_range, PathInputModel
+from tools.chroma_tool import search_menu_items_with_ids
+from tools.db_tool import get_all_menu_items
+from tools.amap_tool import check_delivery_range, PathInputModel
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,8 @@ class SmartRestaurantGraph:
             api_key=self.dashscope_api_key,
             model=self.model_name,
             base_url=self.api_base,
-            temperature=0.7
+            temperature=0.7,
+            streaming=True
         )
         
         self.workflow = self._create_workflow()
@@ -66,33 +68,46 @@ class SmartRestaurantGraph:
         
         return graph
 
-    def intent_analyzer(self, state: AgentState):
+    async def intent_analyzer(self, state: AgentState, config: RunnableConfig):
         """意图分析：确定意图并重写搜索词"""
-        logger.info("LangGraph Node: intent_analyzer")
+        import time
+        start_t = time.time()
+        logger.info("LangGraph Node: intent_analyzer - Start")
         
-        system_msg = """你是一个智能餐厅助手的调度中心。请分析用户输入并决定意图。
-        
-        **意图分类：**
-        1. menu: 涉及菜品推荐、查询、口味咨询。
-        2. delivery: 涉及配送范围、距离查询。
-        3. general: 涉及餐厅营业时间、电话、地址等基本信息。
-        4. chat: 纯闲聊、礼貌性回复或不涉及上述内容的简单对话。
+        user_msg = state['messages'][-1].content
+        # 快速判断：简单问候直接跳过 LLM
+        greetings = ["你好", "您好", "在吗", "hi", "hello", "哈喽"]
+        if user_msg.strip().lower() in greetings:
+            logger.info(f"LangGraph Node: intent_analyzer - Fast path, duration: {time.time()-start_t:.4f}s")
+            return {"intent": "chat", "search_query": ""}
 
-        **任务：搜索词重写 (Search Query Rewriting)**
-        如果用户的问题依赖上下文（如“再推荐几个”、“还有吗”），请将其重写为独立的搜索关键词。
+        system_msg = """分析用户意图并重写搜索词。
+意图分类：
+1. menu: 菜品推荐、查询、口味。
+2. delivery: 配送范围、距离。
+3. general: 餐厅基本信息。
+4. chat: 闲聊。
+
+如果依赖上下文（如“再推荐几个”），重写为独立搜索词。
+只返回 JSON: {"intent": "...", "search_query": "..."}"""
         
-        请严格返回JSON：{"intent": "意图", "search_query": "重写后的搜索词"}
-        """
-        
-        messages = [SystemMessage(content=system_msg)] + state['messages'][-10:]
+        messages = [SystemMessage(content=system_msg)] + state['messages'][-5:] # 减少历史消息数量以提速
         
         try:
-            response = self.llm.invoke(messages)
+            # 传递 config 以便 callbacks 传播
+            response = await self.llm.ainvoke(messages, config=config)
             res_content = response.content.strip()
+            # 兼容处理
             if "```json" in res_content:
                 res_content = res_content.split("```json")[1].split("```")[0].strip()
+            elif "{" in res_content and "}" in res_content:
+                # 提取第一个 { 和 最后一个 } 之间的内容
+                start = res_content.find("{")
+                end = res_content.rfind("}") + 1
+                res_content = res_content[start:end]
             
             res = json.loads(res_content)
+            logger.info(f"LangGraph Node: intent_analyzer - Done, intent: {res.get('intent')}, duration: {time.time()-start_t:.4f}s")
             return {
                 "intent": res.get("intent", "chat"),
                 "search_query": res.get("search_query", "")
@@ -101,11 +116,13 @@ class SmartRestaurantGraph:
             logger.error(f"意图分析失败: {e}")
             return {"intent": "chat", "search_query": ""}
 
-    def data_retriever(self, state: AgentState):
+    async def data_retriever(self, state: AgentState):
         """数据检索：从不同数据源获取原始信息"""
+        import time
+        start_t = time.time()
         intent = state["intent"]
         query = state["search_query"]
-        logger.info(f"LangGraph Node: data_retriever -> {intent} for '{query}'")
+        logger.info(f"LangGraph Node: data_retriever - Start -> {intent} for '{query}'")
         
         retrieved_data = None
         menu_ids = []
@@ -123,6 +140,7 @@ class SmartRestaurantGraph:
                 # 简单处理：可以从文件或配置读取，这里模拟检索
                 retrieved_data = "本餐厅营业时间为 9:00 - 22:00，地址位于北京市海淀区XX路，联系电话：010-12345678。"
             
+            logger.info(f"LangGraph Node: data_retriever - Done, duration: {time.time()-start_t:.4f}s")
             return {
                 "retrieved_data": retrieved_data,
                 "menu_ids": menu_ids
@@ -131,76 +149,117 @@ class SmartRestaurantGraph:
             logger.error(f"数据检索失败: {e}")
             return {"retrieved_data": "数据获取失败"}
 
-    def responder(self, state: AgentState):
+    async def responder(self, state: AgentState, config: RunnableConfig):
         """生成最终回复：结合历史、检索数据和用户原始提问"""
-        logger.info("LangGraph Node: responder")
+        import time
+        import re
+        start_t = time.time()
+        logger.info("LangGraph Node: responder - Start")
         
-        intent = state["intent"]
-        data = state["retrieved_data"]
+        intent = state.get("intent", "chat")
+        data = state.get("retrieved_data", [])
         
-        system_msg = f"""你是一个亲切专业的智能餐厅点餐助手。
-        你的任务是根据提供的【参考数据】和【对话历史】，回答用户的【当前提问】。
-        
-        **回复准则：**
-        1. 保持口语化、亲切，像真人店小二一样，多使用“客官”、“小店”等词汇。
-        2. **多轮对话处理**：
-           - 务必承接上文。如果用户说“再推荐几个”，你应该基于之前的推荐进一步挖掘参考数据中的其他项。
-           - 避免重复推荐上一轮已经提到过的菜品。
-        3. **数据筛选**：
-           - 参考数据中包含多道菜品，请根据用户的特定要求（如“更辣”、“素食”、“便宜点”）从中筛选最符合的进行详细描述。
-           - 如果参考数据里确实没有符合“更辣”要求的菜品，再告知用户并建议模拟调整口味。
-        4. 推荐时要详细描述口感和推荐理由，并引导用户下单。
-        5. 不要复读参考数据，要进行二次创作。
+        system_msg = f"""你是一个亲切专业的智能餐厅助手（小二）。
+任务：根据【参考数据】和【对话历史】，回答用户的【当前提问】。
 
-        **参考数据（来自向量数据库）：**
-        {json.dumps(data, ensure_ascii=False) if data else "无特定参考数据，请根据常识回答"}
-        """
+准则：
+1. 口语化，使用“客官”、“小店”。
+2. **多轮对话**：承接上文，不重复推荐。
+3. **数据筛选**：从数据中选出最符合要求的（如“更辣”、“素食”）。若无，则如实告知。
+4. **必须明确提及菜品名称**：在推荐时，请务必使用【参考数据】中提供的完整菜品名称，不要随意缩减或更改。
+5. 描述口感和理由，引导下单。
+
+参考数据：
+{json.dumps(data, ensure_ascii=False) if data else "无特定数据"}
+"""
         
         messages = [SystemMessage(content=system_msg)] + state['messages']
         
         try:
-            response = self.llm.invoke(messages)
-            final_text = response.content
+            # 关键：tags 应该放在 config 中，而不是作为独立参数传递给 astream
+            final_text = ""
+            stream_config = config.copy() if config else {}
+            if "tags" not in stream_config:
+                stream_config["tags"] = []
+            if "responder_llm" not in stream_config["tags"]:
+                stream_config["tags"].append("responder_llm")
+
+            async for chunk in self.llm.astream(messages, config=stream_config):
+                final_text += chunk.content
             
+            # 根据生成的文本内容，动态筛选真正推荐的菜品 ID
+            recommended_ids = []
+            if data and isinstance(data, list):
+                for item_str in data:
+                    # 尝试从内容字符串中提取 ID 和名称
+                    # 格式参考: "菜品ID:1|菜品名称:东坡肉|..."
+                    id_match = re.search(r"菜品ID:(\d+)", item_str)
+                    name_match = re.search(r"菜品名称:([^|]+)", item_str)
+                    
+                    if id_match and name_match:
+                        dish_id = id_match.group(1)
+                        dish_name = name_match.group(1).strip()
+                        # 如果模型回复中提到了该菜品名称，则认为是被选中的推荐
+                        if dish_name in final_text:
+                            recommended_ids.append(dish_id)
+            
+            logger.info(f"LangGraph Node: responder - Done, filtered menu_ids: {recommended_ids}, duration: {time.time()-start_t:.4f}s")
             return {
                 "final_response": final_text,
-                "messages": [AIMessage(content=final_text)]
+                "messages": [AIMessage(content=final_text)],
+                "menu_ids": recommended_ids
             }
         except Exception as e:
             logger.error(f"生成回复失败: {e}")
-            return {"final_response": "抱歉，我现在有点忙，请稍后再试。"}
+            return {"final_response": "抱歉，我现在有点忙，请稍后再试。", "menu_ids": []}
 
     async def astream_run(self, user_query: str, thread_id: str = "default"):
         """异步流式运行"""
         config = {"configurable": {"thread_id": thread_id}}
         
-        # 使用 astream_events 来获取详细的流式事件
-        async for event in self.app.astream_events(
-            {"messages": [HumanMessage(content=user_query)]},
-            config=config,
-            version="v2"
-        ):
-            kind = event["event"]
-            if kind == "on_chat_model_stream":
-                # 只在 responder 阶段流式输出文本
-                # 注意：这里需要根据具体的 trace 逻辑判断当前是否在 responder 节点
-                # 简单起见，我们直接检查 content
-                content = event["data"]["chunk"].content
-                if content:
-                    yield {"type": "content", "content": content}
-            
-            elif kind == "on_chain_end":
-                # 当整个 graph 结束时，提取最终状态中的 menu_ids
-                if event["name"] == "LangGraph":
-                    final_output = event["data"]["output"]
-                    if "menu_ids" in final_output:
-                        yield {"type": "metadata", "menu_ids": final_output["menu_ids"]}
+        logger.info(f"LangGraph astream_run start: {user_query}")
+        has_sent_content = False
+        
+        try:
+            async for event in self.app.astream_events(
+                {"messages": [HumanMessage(content=user_query)]},
+                config=config,
+                version="v2"
+            ):
+                kind = event["event"]
+                tags = event.get("tags", [])
+                
+                # 1. 处理流式文本输出
+                if kind == "on_chat_model_stream":
+                    if "responder_llm" in tags or not tags: 
+                        chunk = event["data"].get("chunk")
+                        if chunk:
+                            content = getattr(chunk, 'content', '')
+                            if content:
+                                has_sent_content = True
+                                yield {"type": "content", "content": content}
+                
+                # 2. 处理节点结束事件
+                elif kind == "on_chain_end":
+                    if event["name"] == "LangGraph":
+                        final_state = event["data"]["output"]
+                        # 如果直到最后都没有流式输出内容（可能是报错了或节点直接返回了非流式内容）
+                        if not has_sent_content and "final_response" in final_state:
+                            yield {"type": "content", "content": final_state["final_response"]}
+                        
+                        if isinstance(final_state, dict) and "menu_ids" in final_state:
+                            menu_ids = final_state["menu_ids"]
+                            logger.info(f"LangGraph astream_run - Yielding menu_ids: {menu_ids}")
+                            yield {"type": "metadata", "menu_ids": menu_ids}
+        except Exception as e:
+            logger.error(f"LangGraph astream_run error: {e}")
+            yield {"type": "error", "content": "对话系统暂时不可用，请稍后再试。"}
 
-    def run(self, user_query: str, thread_id: str = "default"):
-        """运行流程"""
+    async def run(self, user_query: str, thread_id: str = "default"):
+        """运行流程 (异步)"""
         config = {"configurable": {"thread_id": thread_id}}
         # 初始状态只传入新消息
-        final_state = self.app.invoke(
+        final_state = await self.app.ainvoke(
             {"messages": [HumanMessage(content=user_query)]}, 
             config=config
         )

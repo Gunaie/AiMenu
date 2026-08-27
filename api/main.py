@@ -9,7 +9,7 @@
 from  fastapi import  FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List,Optional
-from smart_diancan.tools.amap_tool import PathInputModel
+from tools.amap_tool import PathInputModel
 import  logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -83,10 +83,10 @@ async def chat_endpoint(request: ChatRequest):
     智能对话接口 (非流式)
     """
     try:
-        from  smart_diancan.service.diancan_service import smart_chat
+        from  service.diancan_service import smart_chat
 
         # 调用智能对话服务
-        result = smart_chat(request.query, request.session_id)
+        result = await smart_chat(request.query, request.session_id)
 
         # 处理不同类型的返回值
         if isinstance(result, dict) and "recommendation" in result and "menu_ids" in result:
@@ -116,14 +116,16 @@ async def chat_stream_endpoint(request: ChatRequest):
     """
     智能对话接口 (流式输出)
     """
-    from smart_diancan.agent.assistant import chat_with_assistant_stream
+    from agent.assistant import chat_with_assistant_stream
     from fastapi.responses import StreamingResponse
     import json
 
     async def event_generator():
         async for chunk in chat_with_assistant_stream(request.query, request.session_id):
             # 以 Server-Sent Events (SSE) 格式发送
-            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            data = json.dumps(chunk, ensure_ascii=False)
+            # logger.info(f"SSE Yield: {data}")
+            yield f"data: {data}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -133,7 +135,7 @@ async def menu_list_endpoint():
     """菜品列表区域展示"""
 
     # 1.调用service
-    from  smart_diancan.service.diancan_service import get_menu
+    from  service.diancan_service import get_menu
 
     # 2.调用方法
     menu_items=get_menu()
@@ -166,7 +168,7 @@ async def delivery_endpoint(request: DeliveryRequest):
 
     # 1.导入service
     try:
-        from  smart_diancan.service.diancan_service import  check_delivery_range
+        from  service.diancan_service import  check_delivery_range
 
         # 2.调用
         check_delivery_range_response=check_delivery_range(request.address, request.travel_mode)

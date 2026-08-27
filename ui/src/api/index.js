@@ -75,10 +75,12 @@ export const chatAPI = {
       for (const line of lines) {
         if (line.startsWith('data: ')) {
           try {
-            const data = JSON.parse(line.substring(6));
+            const dataStr = line.substring(6);
+            // console.log('收到流式数据块:', dataStr);
+            const data = JSON.parse(dataStr);
             onChunk(data);
           } catch (e) {
-            console.error('解析流式数据失败:', e);
+            console.error('解析流式数据失败:', e, '原始数据:', line);
           }
         }
       }
