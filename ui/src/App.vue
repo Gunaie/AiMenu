@@ -313,17 +313,28 @@ export default {
       chatQuery.value = ''
       chatLoading.value = true
 
+      // 创建一个占位的 AI 回复
+      const assistantMsg = { 
+        role: 'assistant', 
+        content: '', 
+        menu_ids: [] 
+      }
+      chatHistory.value.push(assistantMsg)
+
       try {
-        const response = await chatAPI.sendMessage(query, sessionId.value)
-        const content = response.recommendation || response.response || '抱歉，我无法理解。'
-        chatHistory.value.push({ 
-          role: 'assistant', 
-          content, 
-          menu_ids: response.menu_ids 
+        await chatAPI.sendMessageStream(query, sessionId.value, (chunk) => {
+          if (chunk.type === 'content') {
+            assistantMsg.content += chunk.content
+          } else if (chunk.type === 'metadata') {
+            if (chunk.menu_ids) {
+              assistantMsg.menu_ids = chunk.menu_ids
+              highlightRecommendedItems(chunk.menu_ids)
+            }
+          }
         })
-        if (response.menu_ids) highlightRecommendedItems(response.menu_ids)
       } catch (error) {
-        chatHistory.value.push({ role: 'assistant', content: '服务响应异常，请稍后再试。' })
+        console.error('流式对话失败:', error)
+        assistantMsg.content = '服务响应异常，请稍后再试。'
       } finally {
         chatLoading.value = false
       }

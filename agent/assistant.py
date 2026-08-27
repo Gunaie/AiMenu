@@ -7,6 +7,18 @@ from smart_diancan.agent.langgraph_agent import restaurant_agent
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+async def chat_with_assistant_stream(user_query: str, session_id: str = "default"):
+    """
+    流式对话接口
+    """
+    try:
+        logger.info(f"开始流式对话: query='{user_query}', session='{session_id}'")
+        async for chunk in restaurant_agent.astream_run(user_query, thread_id=session_id):
+            yield chunk
+    except Exception as e:
+        logger.error(f"流式 Agent 执行异常: {e}")
+        yield {"type": "error", "content": str(e)}
+
 def chat_with_assistant(user_query: str, session_id: str = "default"):
     """
     和智能小助手对话 (已升级为 LangGraph 架构)

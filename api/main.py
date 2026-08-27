@@ -80,9 +80,7 @@ class MenuListResponse(BaseModel):
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     """
-    智能对话接口
-
-    接收用户问题，返回智能助手回复
+    智能对话接口 (非流式)
     """
     try:
         from  smart_diancan.service.diancan_service import smart_chat
@@ -112,6 +110,22 @@ async def chat_endpoint(request: ChatRequest):
             status_code=500,
             detail=f"智能对话服务失败: {str(e)}"
         )
+
+@app.post("/chat/stream")
+async def chat_stream_endpoint(request: ChatRequest):
+    """
+    智能对话接口 (流式输出)
+    """
+    from smart_diancan.agent.assistant import chat_with_assistant_stream
+    from fastapi.responses import StreamingResponse
+    import json
+
+    async def event_generator():
+        async for chunk in chat_with_assistant_stream(request.query, request.session_id):
+            # 以 Server-Sent Events (SSE) 格式发送
+            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.get("/menu/list", response_model=MenuListResponse)

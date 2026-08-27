@@ -45,6 +45,44 @@ export const chatAPI = {
   // 发送聊天消息
   sendMessage: async (query, session_id = 'default') => {
     return await api.post('/chat', { query, session_id })
+  },
+  // 流式发送消息
+  sendMessageStream: async (query, session_id = 'default', onChunk) => {
+    const response = await fetch('/api/chat/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ query, session_id }),
+    });
+
+    if (!response.ok) {
+      throw new Error('网络响应错误');
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.substring(6));
+            onChunk(data);
+          } catch (e) {
+            console.error('解析流式数据失败:', e);
+          }
+        }
+      }
+    }
   }
 }
 

@@ -170,6 +170,32 @@ class SmartRestaurantGraph:
             logger.error(f"生成回复失败: {e}")
             return {"final_response": "抱歉，我现在有点忙，请稍后再试。"}
 
+    async def astream_run(self, user_query: str, thread_id: str = "default"):
+        """异步流式运行"""
+        config = {"configurable": {"thread_id": thread_id}}
+        
+        # 使用 astream_events 来获取详细的流式事件
+        async for event in self.app.astream_events(
+            {"messages": [HumanMessage(content=user_query)]},
+            config=config,
+            version="v2"
+        ):
+            kind = event["event"]
+            if kind == "on_chat_model_stream":
+                # 只在 responder 阶段流式输出文本
+                # 注意：这里需要根据具体的 trace 逻辑判断当前是否在 responder 节点
+                # 简单起见，我们直接检查 content
+                content = event["data"]["chunk"].content
+                if content:
+                    yield {"type": "content", "content": content}
+            
+            elif kind == "on_chain_end":
+                # 当整个 graph 结束时，提取最终状态中的 menu_ids
+                if event["name"] == "LangGraph":
+                    final_output = event["data"]["output"]
+                    if "menu_ids" in final_output:
+                        yield {"type": "metadata", "menu_ids": final_output["menu_ids"]}
+
     def run(self, user_query: str, thread_id: str = "default"):
         """运行流程"""
         config = {"configurable": {"thread_id": thread_id}}
