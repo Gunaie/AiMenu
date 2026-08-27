@@ -8,14 +8,21 @@
             <el-icon><Food /></el-icon>
             <span>智能点餐系统</span>
           </div>
-          <el-button
-            type="primary"
-            link
-            @click="loadMenuItems"
-            :loading="menuLoading"
-          >
-            <el-icon><Refresh /></el-icon>
-          </el-button>
+          <div class="header-actions">
+            <el-badge :value="cartCount" :hidden="cartCount === 0" class="cart-badge">
+              <el-button type="primary" link @click="showCart = true">
+                <el-icon size="20"><ShoppingCart /></el-icon>
+              </el-button>
+            </el-badge>
+            <el-button
+              type="primary"
+              link
+              @click="loadMenuItems"
+              :loading="menuLoading"
+            >
+              <el-icon><Refresh /></el-icon>
+            </el-button>
+          </div>
         </div>
 
         <div class="menu-filter">
@@ -49,6 +56,9 @@
                 <el-tag v-if="item.is_vegetarian" size="small" type="success" effect="light">素食</el-tag>
                 <el-badge v-if="highlightedItems.includes(item.id.toString())" value="推荐" class="recommend-badge" />
               </div>
+              <div class="menu-card-footer">
+                <el-button type="primary" size="small" @click="addToCart(item)">加入购物车</el-button>
+              </div>
             </div>
           </div>
           <el-empty v-else-if="!menuLoading" description="暂无相关菜品" />
@@ -78,9 +88,18 @@
                 <el-icon v-if="msg.role === 'assistant'"><Service /></el-icon>
                 <el-icon v-else><User /></el-icon>
               </div>
-              <div class="message-content">
-                <div v-if="msg.role === 'assistant'" v-html="renderMarkdown(msg.content)" class="markdown-body"></div>
-                <div v-else>{{ msg.content }}</div>
+              <div class="message-content-wrapper">
+                <div class="message-content">
+                  <div v-if="msg.role === 'assistant'" v-html="renderMarkdown(msg.content)" class="markdown-body"></div>
+                  <div v-else>{{ msg.content }}</div>
+                </div>
+                <!-- AI推荐菜品快捷添加 -->
+                <div v-if="msg.role === 'assistant' && msg.menu_ids && msg.menu_ids.length > 0" class="recommendation-quick-add">
+                  <div v-for="dishId in msg.menu_ids" :key="dishId" class="quick-add-item">
+                    <span class="quick-dish-name">{{ getDishNameById(dishId) }}</span>
+                    <el-button type="primary" size="small" link @click="addById(dishId)">+ 加入</el-button>
+                  </div>
+                </div>
               </div>
             </div>
             
@@ -142,12 +161,42 @@
         </el-main>
       </el-container>
     </el-container>
+
+    <!-- 购物车抽屉 -->
+    <el-drawer
+      v-model="showCart"
+      title="您的购物车"
+      direction="rtl"
+      size="350px"
+    >
+      <div class="cart-container">
+        <div v-if="cart.length > 0" class="cart-items">
+          <div v-for="item in cart" :key="item.id" class="cart-item">
+            <div class="cart-item-info">
+              <div class="cart-item-name">{{ item.dish_name }}</div>
+              <div class="cart-item-price">¥{{ item.price }}</div>
+            </div>
+            <div class="cart-item-actions">
+              <el-input-number v-model="item.quantity" :min="1" size="small" />
+              <el-button type="danger" icon="Delete" circle size="small" @click="removeFromCart(item.id)" />
+            </div>
+          </div>
+          <div class="cart-total">
+            <span>总计:</span>
+            <span class="total-amount">¥{{ totalPrice }}</span>
+          </div>
+          <el-button type="primary" class="checkout-btn" @click="checkout">提交订单</el-button>
+        </div>
+        <el-empty v-else description="购物车还是空的" />
+      </div>
+    </el-drawer>
   </div>
 </template>
 
 <script>
 import { ref, onMounted, computed, nextTick, watch } from 'vue'
 import { chatAPI, deliveryAPI, menuAPI } from './api/index.js'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 export default {
   name: 'App',
@@ -168,6 +217,50 @@ export default {
     const menuLoading = ref(false)
     const highlightedItems = ref([])
     const activeCategory = ref('全部')
+
+    // 购物车相关
+    const showCart = ref(false)
+    const cart = ref([])
+    const cartCount = computed(() => cart.value.reduce((sum, item) => sum + item.quantity, 0))
+    const totalPrice = computed(() => cart.value.reduce((sum, item) => sum + item.price * item.quantity, 0).toFixed(2))
+
+    const addToCart = (item) => {
+      const existing = cart.value.find(i => i.id === item.id)
+      if (existing) {
+        existing.quantity++
+      } else {
+        cart.value.push({ ...item, quantity: 1 })
+      }
+      ElMessage.success(`已添加 ${item.dish_name}`)
+    }
+
+    const addById = (id) => {
+      const dish = menuItems.value.find(d => d.id.toString() === id.toString())
+      if (dish) {
+        addToCart(dish)
+      }
+    }
+
+    const removeFromCart = (id) => {
+      cart.value = cart.value.filter(i => i.id !== id)
+    }
+
+    const checkout = () => {
+      ElMessageBox.confirm(
+        `确认下单吗？总计金额：¥${totalPrice.value}`,
+        '订单确认',
+        { confirmButtonText: '确认', cancelButtonText: '取消', type: 'success' }
+      ).then(() => {
+        ElMessage.success('下单成功！')
+        cart.value = []
+        showCart.value = false
+      })
+    }
+
+    const getDishNameById = (id) => {
+      const dish = menuItems.value.find(d => d.id.toString() === id.toString())
+      return dish ? dish.dish_name : '未知菜品'
+    }
 
     const filteredMenu = computed(() => {
       if (activeCategory.value === '全部') return menuItems.value
@@ -223,7 +316,11 @@ export default {
       try {
         const response = await chatAPI.sendMessage(query, sessionId.value)
         const content = response.recommendation || response.response || '抱歉，我无法理解。'
-        chatHistory.value.push({ role: 'assistant', content })
+        chatHistory.value.push({ 
+          role: 'assistant', 
+          content, 
+          menu_ids: response.menu_ids 
+        })
         if (response.menu_ids) highlightRecommendedItems(response.menu_ids)
       } catch (error) {
         chatHistory.value.push({ role: 'assistant', content: '服务响应异常，请稍后再试。' })
@@ -264,7 +361,8 @@ export default {
       chatQuery, chatHistory, chatLoading, chatWindow,
       deliveryAddress, travelMode, deliveryResponse, deliveryLoading, showDeliveryInput,
       menuItems, menuLoading, highlightedItems, activeCategory, filteredMenu,
-      sendChatQuery, checkDelivery, loadMenuItems, getSpiceType, renderMarkdown
+      sendChatQuery, checkDelivery, loadMenuItems, getSpiceType, renderMarkdown,
+      showCart, cart, cartCount, totalPrice, addToCart, addById, removeFromCart, checkout, getDishNameById
     }
   }
 }
@@ -310,6 +408,16 @@ body {
   border-bottom: 1px solid var(--border-color);
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cart-badge {
+  margin-right: 5px;
+}
+
 .logo {
   display: flex;
   align-items: center;
@@ -353,6 +461,12 @@ body {
   display: flex;
   justify-content: space-between;
   margin-bottom: 8px;
+}
+
+.menu-card-footer {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 .dish-name {
@@ -441,6 +555,12 @@ body {
   color: white;
 }
 
+.message-content-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .message-content {
   padding: 12px 16px;
   border-radius: 12px;
@@ -460,6 +580,32 @@ body {
   border-bottom-right-radius: 2px;
 }
 
+.recommendation-quick-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.quick-add-item {
+  background: #fff;
+  border: 1px solid var(--border-color);
+  padding: 4px 10px;
+  border-radius: 20px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+.quick-dish-name {
+  color: var(--text-main);
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Input Area Styling */
 .input-area {
   padding: 20px 10%;
@@ -468,58 +614,60 @@ body {
   position: relative;
 }
 
-.chat-input-wrapper {
+/* Cart Styling */
+.cart-container {
+  padding: 0 20px;
+  height: 100%;
   display: flex;
-  gap: 12px;
+  flex-direction: column;
+}
+
+.cart-items {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.cart-item {
+  display: flex;
+  justify-content: space-between;
   align-items: center;
+  padding: 15px 0;
+  border-bottom: 1px solid var(--border-color);
 }
 
-.delivery-bar {
-  position: absolute;
-  bottom: 85px;
-  left: 10%;
-  right: 10%;
-  background: white;
-  padding: 15px;
-  border-radius: 12px;
-  box-shadow: 0 -4px 12px rgba(0,0,0,0.1);
+.cart-item-name {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.cart-item-price {
+  color: #f56c6c;
+  font-size: 13px;
+}
+
+.cart-item-actions {
   display: flex;
+  align-items: center;
   gap: 10px;
-  z-index: 100;
-  border: 1px solid var(--border-color);
 }
 
-.delivery-toast {
-  position: absolute;
-  bottom: 85px;
-  right: 10%;
-  width: 300px;
-}
-
-.loading-dots span {
-  animation: blink 1.4s infinite both;
-  font-size: 24px;
+.cart-total {
+  margin-top: 20px;
+  padding: 20px 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-top: 2px solid var(--border-color);
   font-weight: bold;
+  font-size: 18px;
 }
 
-.loading-dots span:nth-child(2) { animation-delay: 0.2s; }
-.loading-dots span:nth-child(3) { animation-delay: 0.4s; }
-
-@keyframes blink {
-  0% { opacity: .2; }
-  20% { opacity: 1; }
-  100% { opacity: .2; }
+.total-amount {
+  color: #f56c6c;
 }
 
-/* Markdown adjustments */
-.markdown-body h1, .markdown-body h2, .markdown-body h3 {
-  margin: 10px 0;
-  font-size: 1.1em;
+.checkout-btn {
+  width: 100%;
+  margin-top: 20px;
+  padding: 12px;
 }
-.markdown-body ul { padding-left: 20px; margin: 5px 0; }
-
-/* Custom Scrollbar */
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-thumb { background: #ddd; border-radius: 10px; }
-::-webkit-scrollbar-thumb:hover { background: #ccc; }
-</style>
