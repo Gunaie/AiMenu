@@ -5,22 +5,25 @@ from typing import Annotated, TypedDict, List, Dict, Any, Union
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph.message import add_messages
 
-from smart_diancan.agent.mcp import general_inquiry, menu_inquiry, delivery_check_tool
+# 导入底层工具函数（直接使用逻辑函数，而不是包装好的tool）
+from smart_diancan.tools.chroma_tool import search_menu_items_with_ids
+from smart_diancan.tools.db_tool import get_all_menu_items
+from smart_diancan.tools.amap_tool import check_delivery_range, PathInputModel
 
 logger = logging.getLogger(__name__)
 
 # 定义 Agent 状态
 class AgentState(TypedDict):
-    messages: Annotated[List[BaseMessage], "The messages in the conversation"]
-    next_step: str
-    tool_params: Dict[str, Any]
-    tool_result: Union[str, Dict[str, Any]]
-    final_response: str
-    menu_ids: List[str]
+    messages: Annotated[List[BaseMessage], add_messages]
+    intent: str           # 用户意图 (general, menu, delivery, chat)
+    search_query: str     # 重写后的检索词
+    retrieved_data: Any   # 检索到的原始数据
+    final_response: str   # 最终回复
+    menu_ids: List[str]   # 推荐的菜品ID
 
 class SmartRestaurantGraph:
     def __init__(self):
@@ -28,7 +31,6 @@ class SmartRestaurantGraph:
         self.model_name = os.getenv("DASHSCOPE_MODEL_NAME", "qwen3.7-flash")
         self.api_base = os.getenv("DASHSCOPE_API_BASE", "https://dashscope.aliyuncs.com/compatible-mode/v1/")
         
-        # 初始化 LLM
         self.llm = ChatOpenAI(
             api_key=self.dashscope_api_key,
             model=self.model_name,
@@ -36,14 +38,6 @@ class SmartRestaurantGraph:
             temperature=0.7
         )
         
-        # 初始化工具映射
-        self.tools = {
-            "general_inquiry": general_inquiry,
-            "menu_inquiry": menu_inquiry,
-            "delivery_check_tool": delivery_check_tool
-        }
-        
-        # 构建图
         self.workflow = self._create_workflow()
         self.memory = MemorySaver()
         self.app = self.workflow.compile(checkpointer=self.memory)
@@ -51,124 +45,143 @@ class SmartRestaurantGraph:
     def _create_workflow(self):
         graph = StateGraph(AgentState)
         
-        # 添加节点
         graph.add_node("intent_analyzer", self.intent_analyzer)
-        graph.add_node("tool_executor", self.tool_executor)
+        graph.add_node("data_retriever", self.data_retriever)
+        graph.add_node("responder", self.responder)
         
-        # 设置入口
         graph.set_entry_point("intent_analyzer")
         
-        # 添加边
+        # 意图分析 -> 数据检索 (如果需要) 或 直接回复
         graph.add_conditional_edges(
             "intent_analyzer",
-            self.should_continue,
+            lambda x: "retrieve" if x["intent"] != "chat" else "respond",
             {
-                "continue": "tool_executor",
-                "end": END
+                "retrieve": "data_retriever",
+                "respond": "responder"
             }
         )
         
-        graph.add_edge("tool_executor", END)
+        graph.add_edge("data_retriever", "responder")
+        graph.add_edge("responder", END)
         
         return graph
 
     def intent_analyzer(self, state: AgentState):
-        """意图分析节点"""
+        """意图分析：确定意图并重写搜索词"""
         logger.info("LangGraph Node: intent_analyzer")
         
-        system_msg = """你是一个智能餐厅助手的意图分析器。
-        请根据对话历史和用户最新问题，选择最合适的工具：
-        1. general_inquiry: 餐厅常规咨询（时间、地址、电话、活动等）
-        2. menu_inquiry: 菜品推荐、介绍、点餐咨询等
-        3. delivery_check_tool: 配送范围检查（需包含地址信息）
+        system_msg = """你是一个智能餐厅助手的调度中心。请分析用户输入并决定意图。
         
-        你必须严格返回JSON格式：{"tool_name": "工具名", "format_query": "优化后的问题"}
-        如果不需要工具，请返回：{"tool_name": "none", "format_query": ""}
+        **意图分类：**
+        1. menu: 涉及菜品推荐、查询、口味咨询。
+        2. delivery: 涉及配送范围、距离查询。
+        3. general: 涉及餐厅营业时间、电话、地址等基本信息。
+        4. chat: 纯闲聊、礼貌性回复或不涉及上述内容的简单对话。
+
+        **任务：搜索词重写 (Search Query Rewriting)**
+        如果用户的问题依赖上下文（如“再推荐几个”、“还有吗”），请将其重写为独立的搜索关键词。
+        
+        请严格返回JSON：{"intent": "意图", "search_query": "重写后的搜索词"}
+        """
+        
+        messages = [SystemMessage(content=system_msg)] + state['messages'][-10:]
+        
+        try:
+            response = self.llm.invoke(messages)
+            res_content = response.content.strip()
+            if "```json" in res_content:
+                res_content = res_content.split("```json")[1].split("```")[0].strip()
+            
+            res = json.loads(res_content)
+            return {
+                "intent": res.get("intent", "chat"),
+                "search_query": res.get("search_query", "")
+            }
+        except Exception as e:
+            logger.error(f"意图分析失败: {e}")
+            return {"intent": "chat", "search_query": ""}
+
+    def data_retriever(self, state: AgentState):
+        """数据检索：从不同数据源获取原始信息"""
+        intent = state["intent"]
+        query = state["search_query"]
+        logger.info(f"LangGraph Node: data_retriever -> {intent} for '{query}'")
+        
+        retrieved_data = None
+        menu_ids = []
+        
+        try:
+            if intent == "menu":
+                # 增加检索数量 (top_k=5)，为多轮对话提供更多候选，由 responder 进行二次筛选
+                similar_result = search_menu_items_with_ids(query, top_k=5)
+                retrieved_data = similar_result.get("contents", [])
+                menu_ids = similar_result.get("ids", [])
+            elif intent == "delivery":
+                # 配送校验 (假设 query 就是地址)
+                retrieved_data = check_delivery_range(query, "2")
+            elif intent == "general":
+                # 简单处理：可以从文件或配置读取，这里模拟检索
+                retrieved_data = "本餐厅营业时间为 9:00 - 22:00，地址位于北京市海淀区XX路，联系电话：010-12345678。"
+            
+            return {
+                "retrieved_data": retrieved_data,
+                "menu_ids": menu_ids
+            }
+        except Exception as e:
+            logger.error(f"数据检索失败: {e}")
+            return {"retrieved_data": "数据获取失败"}
+
+    def responder(self, state: AgentState):
+        """生成最终回复：结合历史、检索数据和用户原始提问"""
+        logger.info("LangGraph Node: responder")
+        
+        intent = state["intent"]
+        data = state["retrieved_data"]
+        
+        system_msg = f"""你是一个亲切专业的智能餐厅点餐助手。
+        你的任务是根据提供的【参考数据】和【对话历史】，回答用户的【当前提问】。
+        
+        **回复准则：**
+        1. 保持口语化、亲切，像真人店小二一样，多使用“客官”、“小店”等词汇。
+        2. **多轮对话处理**：
+           - 务必承接上文。如果用户说“再推荐几个”，你应该基于之前的推荐进一步挖掘参考数据中的其他项。
+           - 避免重复推荐上一轮已经提到过的菜品。
+        3. **数据筛选**：
+           - 参考数据中包含多道菜品，请根据用户的特定要求（如“更辣”、“素食”、“便宜点”）从中筛选最符合的进行详细描述。
+           - 如果参考数据里确实没有符合“更辣”要求的菜品，再告知用户并建议模拟调整口味。
+        4. 推荐时要详细描述口感和推荐理由，并引导用户下单。
+        5. 不要复读参考数据，要进行二次创作。
+
+        **参考数据（来自向量数据库）：**
+        {json.dumps(data, ensure_ascii=False) if data else "无特定参考数据，请根据常识回答"}
         """
         
         messages = [SystemMessage(content=system_msg)] + state['messages']
         
         try:
             response = self.llm.invoke(messages)
-            res_content = response.content.strip()
-            # 兼容处理 Markdown 代码块
-            if "```json" in res_content:
-                res_content = res_content.split("```json")[1].split("```")[0].strip()
-            
-            structured_res = json.loads(res_content)
-            
-            tool_name = structured_res.get("tool_name", "none")
-            format_query = structured_res.get("format_query", "")
+            final_text = response.content
             
             return {
-                "next_step": tool_name,
-                "tool_params": {"query": format_query}
+                "final_response": final_text,
+                "messages": [AIMessage(content=final_text)]
             }
         except Exception as e:
-            logger.error(f"意图分析失败: {e}")
-            return {"next_step": "none"}
-
-    def should_continue(self, state: AgentState):
-        """条件路由"""
-        if state["next_step"] == "none" or state["next_step"] not in self.tools:
-            return "end"
-        return "continue"
-
-    def tool_executor(self, state: AgentState):
-        """工具执行节点"""
-        tool_name = state["next_step"]
-        params = state["tool_params"]
-        logger.info(f"LangGraph Node: tool_executor -> {tool_name}")
-        
-        try:
-            tool_func = self.tools[tool_name]
-            # 特殊处理配送工具的参数提取（LangGraph 改进：可以在意图分析中提取更多结构化参数）
-            if tool_name == "delivery_check_tool":
-                # 简单实现，实际可由 LLM 在 intent_analyzer 中提取 address 和 travel_mode
-                result = tool_func.invoke({"address": params.get("query"), "travel_mode": "2"})
-            else:
-                result = tool_func.invoke({"query": params.get("query")})
-            
-            # 解析结果
-            final_response = ""
-            menu_ids = []
-            
-            if isinstance(result, dict):
-                final_response = result.get("recommendation", "")
-                menu_ids = result.get("menu_ids", [])
-            else:
-                final_response = str(result)
-            
-            return {
-                "final_response": final_response,
-                "menu_ids": menu_ids,
-                "messages": state['messages'] + [AIMessage(content=final_response)]
-            }
-        except Exception as e:
-            err_msg = f"工具执行出错: {str(e)}"
-            return {
-                "final_response": err_msg,
-                "messages": state['messages'] + [AIMessage(content=err_msg)]
-            }
+            logger.error(f"生成回复失败: {e}")
+            return {"final_response": "抱歉，我现在有点忙，请稍后再试。"}
 
     def run(self, user_query: str, thread_id: str = "default"):
-        """运行图流程"""
+        """运行流程"""
         config = {"configurable": {"thread_id": thread_id}}
-        initial_state = {
-            "messages": [HumanMessage(content=user_query)],
-            "next_step": "",
-            "tool_params": {},
-            "tool_result": "",
-            "final_response": "",
-            "menu_ids": []
-        }
-        
-        final_state = self.app.invoke(initial_state, config=config)
+        # 初始状态只传入新消息
+        final_state = self.app.invoke(
+            {"messages": [HumanMessage(content=user_query)]}, 
+            config=config
+        )
         
         return {
-            "response": final_state.get("final_response", "抱歉，我暂时无法回答。"),
+            "response": final_state.get("final_response", "抱歉，没能帮到您。"),
             "menu_ids": final_state.get("menu_ids", [])
         }
 
-# 单例模式
 restaurant_agent = SmartRestaurantGraph()
