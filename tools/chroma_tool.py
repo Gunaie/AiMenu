@@ -7,8 +7,9 @@ ChromaDB向量数据库工具模块
 
 import os
 import dashscope
+import jieba
 from dotenv import load_dotenv
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import chromadb
 from chromadb.config import Settings
 from http import HTTPStatus
@@ -20,7 +21,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class ChromaVectorDB:
-    """ChromaDB向量数据库的操作"""
+    """ChromaDB向量数据库的操作，支持混合检索"""
 
     def __init__(self):
         self.dashscope_api_key = os.getenv("DASHSCOPE_API_KEY")
@@ -88,7 +89,6 @@ class ChromaVectorDB:
             )
 
             if resp.status_code == HTTPStatus.OK:
-                logger.info(f"文本向量化成功")
                 return resp.get('output').get('embeddings')[0].get('embedding')
             else:
                 logger.error(f"发送文本嵌入模型请求处理失败: {resp.message}")
@@ -121,95 +121,120 @@ class ChromaVectorDB:
     def upsert_menu_data(self, menu_data: str = None, clear_existing: bool = True) -> bool:
         """将文本向量存储到ChromaDB向量数据库"""
         try:
-            if not menu_data:
-                from smart_diancan.tools.db_tool import get_all_menu_items
-                if clear_existing:
-                    self.clear_index_vectors()
+            from smart_diancan.tools.db_tool import get_all_menu_items
+            if clear_existing:
+                self.clear_index_vectors()
+            
+            menu_item_str = get_all_menu_items()
+            if not self._validate_datasource(menu_item_str):
+                return False
+
+            embedding_chunks = self._splite_content(menu_item_str)
+            if not embedding_chunks:
+                return False
+
+            if not self.collection and not self.initialize_connection():
+                return False
+
+            ids = []
+            embeddings = []
+            metadatas = []
+            
+            for line_num, chunk in enumerate(embedding_chunks, 1):
+                vector = self._embedding_content(chunk)
+                if not vector:
+                    continue
                 
-                menu_item_str = get_all_menu_items()
-                if not self._validate_datasource(menu_item_str):
-                    return False
-
-                embedding_chunks = self._splite_content(menu_item_str)
-                if not embedding_chunks:
-                    return False
-
-                if not self.collection and not self.initialize_connection():
-                    return False
-
-                ids = []
-                embeddings = []
-                metadatas = []
+                # 提取关键词用于混合搜索
+                keywords = ",".join(jieba.cut_for_search(chunk))
                 
-                for line_num, chunk in enumerate(embedding_chunks, 1):
-                    vector = self._embedding_content(chunk)
-                    if not vector:
-                        continue
-                    
-                    ids.append(str(line_num))
-                    embeddings.append(vector)
-                    metadatas.append({
-                        "content": chunk,
-                        "line_number": line_num,
-                        "dish_id": f"菜品ID:{line_num}",
-                        "type": "menu_item"
-                    })
+                ids.append(str(line_num))
+                embeddings.append(vector)
+                metadatas.append({
+                    "content": chunk,
+                    "line_number": line_num,
+                    "dish_id": f"菜品ID:{line_num}",
+                    "type": "menu_item",
+                    "keywords": keywords
+                })
 
-                if ids:
-                    self.collection.add(
-                        ids=ids,
-                        embeddings=embeddings,
-                        metadatas=metadatas
-                    )
-                
-                logger.info("切分之后的文本内容成功存储到ChromaDB中...")
-                return True
-            return False
+            if ids:
+                self.collection.add(
+                    ids=ids,
+                    embeddings=embeddings,
+                    metadatas=metadatas
+                )
+            
+            logger.info("切分之后的文本内容成功存储到ChromaDB中...")
+            return True
         except Exception as e:
             logger.error(f"同步数据到ChromaDB失败{e}")
             return False
 
-    def search_similar_menu_item(self, query: str, top_k: int = 2) -> List[Dict[str, Any]]:
-        """相似性检索"""
+    def hybrid_search(self, query: str, top_k: int = 2) -> List[Dict[str, Any]]:
+        """混合检索：结合向量搜索和关键词匹配"""
         try:
             if not self.collection and not self.initialize_connection():
                 return []
 
+            # 1. 向量搜索
             query_vector = self._embedding_content(query)
             if not query_vector:
                 return []
 
-            results = self.collection.query(
+            vector_results = self.collection.query(
                 query_embeddings=[query_vector],
-                n_results=top_k,
+                n_results=top_k * 2, # 先多取一点用于混合排序
                 include=["metadatas", "distances"]
             )
 
+            # 2. 关键词加分逻辑
+            query_keywords = set(jieba.cut(query))
             final_results = []
-            if results['ids'] and results['ids'][0]:
-                for i in range(len(results['ids'][0])):
+            
+            if vector_results['ids'] and vector_results['ids'][0]:
+                for i in range(len(vector_results['ids'][0])):
+                    metadata = vector_results['metadatas'][0][i]
+                    content = metadata['content']
+                    vector_score = 1 - vector_results['distances'][0][i]
+                    
+                    # 计算关键词重合度得分
+                    content_keywords = set(jieba.cut(content))
+                    keyword_overlap = len(query_keywords.intersection(content_keywords))
+                    keyword_score = keyword_overlap / len(query_keywords) if query_keywords else 0
+                    
+                    # 混合得分：0.7 向量 + 0.3 关键词
+                    hybrid_score = (vector_score * 0.7) + (keyword_score * 0.3)
+                    
                     final_results.append({
-                        "id": results['ids'][0][i],
-                        "score": 1 - results['distances'][0][i], # Convert distance to similarity score
-                        "content": results['metadatas'][0][i]['content'],
-                        "line_number": results['metadatas'][0][i]['line_number']
+                        "id": vector_results['ids'][0][i],
+                        "score": hybrid_score,
+                        "content": content,
+                        "line_number": metadata['line_number']
                     })
             
-            logger.info(f"查询到相似的文档命中个数{len(final_results)}")
-            return final_results
+            # 按混合得分重排序
+            final_results.sort(key=lambda x: x['score'], reverse=True)
+            
+            logger.info(f"混合检索命中，返回前{top_k}个结果")
+            return final_results[:top_k]
         except Exception as e:
-            logger.error(f"相似性检索失败：{e}")
+            logger.error(f"混合检索失败：{e}")
             return []
+
+    def search_similar_menu_item(self, query: str, top_k: int = 2) -> List[Dict[str, Any]]:
+        """回退到混合检索"""
+        return self.hybrid_search(query, top_k)
 
 # 定义全局实例
 chroma_db = ChromaVectorDB()
 
 def search_menu_items(query: str, top_k: int = 2) -> List[str]:
-    match_result = chroma_db.search_similar_menu_item(query, top_k=top_k)
+    match_result = chroma_db.hybrid_search(query, top_k=top_k)
     return [item['content'] for item in match_result]
 
 def search_menu_items_with_ids(query: str, top_k: int = 2) -> Dict[str, Any]:
-    match_result = chroma_db.search_similar_menu_item(query=query, top_k=top_k)
+    match_result = chroma_db.hybrid_search(query=query, top_k=top_k)
     if not match_result:
         return {"contents": [], "ids": [], "scores": []}
 
@@ -226,3 +251,11 @@ def search_menu_items_with_ids(query: str, top_k: int = 2) -> Dict[str, Any]:
         "ids": ids,
         "scores": [item['score'] for item in match_result]
     }
+
+if __name__ == "__main__":
+    # 初始化并同步数据
+    db = ChromaVectorDB()
+    if db.upsert_menu_data():
+        print("数据同步成功！")
+    else:
+        print("数据同步失败！")

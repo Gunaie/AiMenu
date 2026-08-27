@@ -43,8 +43,8 @@ api.interceptors.response.use(
 // 智能对话API
 export const chatAPI = {
   // 发送聊天消息
-  sendMessage: async (query) => {
-    return await api.post('/chat', { query })
+  sendMessage: async (query, session_id = 'default') => {
+    return await api.post('/chat', { query, session_id })
   }
 }
 

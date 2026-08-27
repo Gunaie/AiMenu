@@ -40,6 +40,7 @@ class DeliveryRequest(BaseModel):
 class ChatRequest(BaseModel):
     """智能对话请求"""
     query: str
+    session_id: Optional[str] = "default"
 
 
 
@@ -87,7 +88,7 @@ async def chat_endpoint(request: ChatRequest):
         from  smart_diancan.service.diancan_service import smart_chat
 
         # 调用智能对话服务
-        result = smart_chat(request.query)
+        result = smart_chat(request.query, request.session_id)
 
         # 处理不同类型的返回值
         if isinstance(result, dict) and "recommendation" in result and "menu_ids" in result:

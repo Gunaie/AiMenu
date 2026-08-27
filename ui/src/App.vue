@@ -152,6 +152,7 @@ import { chatAPI, deliveryAPI, menuAPI } from './api/index.js'
 export default {
   name: 'App',
   setup() {
+    const sessionId = ref('session-' + Math.random().toString(36).substring(2, 9))
     const chatQuery = ref('')
     const chatHistory = ref([])
     const chatLoading = ref(false)
@@ -220,7 +221,7 @@ export default {
       chatLoading.value = true
 
       try {
-        const response = await chatAPI.sendMessage(query)
+        const response = await chatAPI.sendMessage(query, sessionId.value)
         const content = response.recommendation || response.response || '抱歉，我无法理解。'
         chatHistory.value.push({ role: 'assistant', content })
         if (response.menu_ids) highlightRecommendedItems(response.menu_ids)
