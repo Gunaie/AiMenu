@@ -96,6 +96,10 @@ export const deliveryAPI = {
       address, 
       travel_mode 
     })
+  },
+  // 获取输入提示
+  getTips: async (keywords) => {
+    return await api.get('/delivery/tips', { params: { keywords } })
   }
 }
 
@@ -104,6 +108,14 @@ export const menuAPI = {
   // 获取菜品列表
   getMenuList: async () => {
     return await api.get('/menu/list')
+  }
+}
+
+// 餐厅API
+export const restaurantAPI = {
+  // 获取餐厅信息
+  getInfo: async () => {
+    return await api.get('/restaurant/info')
   }
 }
 

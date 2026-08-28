@@ -13,6 +13,7 @@ import mysql.connector
 
 from dotenv import load_dotenv
 from typing import Dict, Any, List
+from tools.redis_tool import cache
 
 load_dotenv()
 
@@ -169,6 +170,12 @@ def get_menu_items() -> List[Dict[str, Any]]:
     前端菜品区域展示
     :return: 字典列表（菜品列表）
     """
+    # 尝试从缓存获取
+    cache_key = "menu:all_items"
+    cached_data = cache.get(cache_key)
+    if cached_data:
+        logger.info("Redis 命中 [菜单列表]")
+        return cached_data
 
     try:
         with DataBaseConnection() as db:
@@ -223,6 +230,8 @@ def get_menu_items() -> List[Dict[str, Any]]:
                 menu_items_list.append(processed_item)
 
             logger.info(f"查询菜品结构化列表信息成功，且菜品个数:{len(menu_items_list)}")
+            # 写入缓存 (有效期 10 分钟，菜单变化不频繁)
+            cache.set(cache_key, menu_items_list, expire=600)
             return menu_items_list
 
     except Exception as e:

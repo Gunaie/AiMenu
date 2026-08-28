@@ -1,0 +1,63 @@
+import redis
+import json
+import logging
+from typing import Optional, Any
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# 日志配置
+logger = logging.getLogger(__name__)
+
+class RedisCache:
+    def __init__(self):
+        host = os.getenv("REDIS_HOST", "localhost")
+        port = int(os.getenv("REDIS_PORT", 6379))
+        db = int(os.getenv("REDIS_DB", 0))
+        password = os.getenv("REDIS_PASSWORD", None)
+        
+        try:
+            self.client = redis.Redis(
+                host=host,
+                port=port,
+                db=db,
+                password=password,
+                decode_responses=True,
+                socket_timeout=2
+            )
+            # 测试连接
+            self.client.ping()
+            logger.info(f"Redis 连接成功: {host}:{port}")
+        except Exception as e:
+            logger.error(f"Redis 连接失败: {e}")
+            self.client = None
+
+    def get(self, key: str) -> Optional[Any]:
+        if not self.client:
+            return None
+        try:
+            data = self.client.get(key)
+            return json.loads(data) if data else None
+        except Exception as e:
+            logger.error(f"Redis GET 失败 [{key}]: {e}")
+            return None
+
+    def set(self, key: str, value: Any, expire: int = 3600):
+        if not self.client:
+            return
+        try:
+            self.client.set(key, json.dumps(value, ensure_ascii=False), ex=expire)
+        except Exception as e:
+            logger.error(f"Redis SET 失败 [{key}]: {e}")
+
+    def delete(self, key: str):
+        if not self.client:
+            return
+        try:
+            self.client.delete(key)
+        except Exception as e:
+            logger.error(f"Redis DELETE 失败 [{key}]: {e}")
+
+# 全局单例
+cache = RedisCache()

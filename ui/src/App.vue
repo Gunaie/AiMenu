@@ -4,9 +4,15 @@
       <!-- 侧边栏：菜品展示 -->
       <el-aside width="400px" class="menu-sidebar">
         <div class="sidebar-header">
-          <div class="logo">
-            <el-icon><Food /></el-icon>
-            <span>智能点餐系统</span>
+          <div class="logo-wrapper">
+            <div class="logo">
+              <el-icon><Food /></el-icon>
+              <span>{{ restaurantInfo.name || '智能点餐系统' }}</span>
+            </div>
+            <div class="restaurant-address" v-if="restaurantInfo.address">
+              <el-icon><Location /></el-icon>
+              <span>{{ restaurantInfo.address }}</span>
+            </div>
           </div>
           <div class="header-actions">
             <el-badge :value="cartCount" :hidden="cartCount === 0" class="cart-badge">
@@ -81,16 +87,45 @@
 
       <el-container>
         <el-main class="chat-main">
+          <!-- 配送状态横幅 -->
+          <div class="delivery-status-banner" :class="{ 'is-active': deliveryResponse }">
+            <div class="banner-content" @click="showDeliveryInput = true">
+              <el-icon class="status-icon">
+                <Location v-if="!deliveryResponse" />
+                <CircleCheck v-else-if="deliveryResponse.in_range" />
+                <Warning v-else />
+              </el-icon>
+              <div class="status-info">
+                <template v-if="!deliveryResponse">
+                  <span class="status-text">未设置配送地址</span>
+                  <span class="status-hint">点击设置以确认配送范围</span>
+                </template>
+                <template v-else>
+                  <span class="status-text">{{ deliveryResponse.formatted_address }}</span>
+                  <span class="status-detail">
+                    {{ deliveryResponse.in_range ? '在配送范围内' : '超出配送范围' }}
+                    <template v-if="deliveryResponse.distance">
+                      | {{ deliveryResponse.distance.toFixed(2) }}km | ￥{{ deliveryResponse.delivery_fee }}配送费 | 约{{ Math.floor(deliveryResponse.duration/60) }}分钟
+                    </template>
+                  </span>
+                </template>
+              </div>
+              <el-button type="primary" link @click.stop="showDeliveryInput = true">
+                {{ deliveryResponse ? '修改' : '去设置' }}
+              </el-button>
+            </div>
+          </div>
+
           <!-- 对话窗口区域 -->
           <div class="chat-window" ref="chatWindow">
             <div class="welcome-msg" v-if="chatHistory.length === 0">
               <el-icon size="48" color="#409EFF"><ChatDotRound /></el-icon>
               <h2>欢迎使用智能点餐助手</h2>
-              <p>您可以问我关于菜品推荐、口味咨询或配送范围的问题</p>
+              <p>为了给您提供更好的服务，请先设置配送地址</p>
               <div class="quick-queries">
+                <el-button type="primary" round @click="showDeliveryInput = true">设置配送地址</el-button>
                 <el-button round size="small" @click="chatQuery = '有什么不辣的推荐吗？'">不辣的菜品</el-button>
                 <el-button round size="small" @click="chatQuery = '我想点一些川菜'">推荐川菜</el-button>
-                <el-button round size="small" @click="chatQuery = '配送范围是多少？'">查询配送</el-button>
               </div>
             </div>
 
@@ -122,21 +157,49 @@
 
           <!-- 输入区域 -->
           <div class="input-area">
-            <div class="delivery-bar" v-if="showDeliveryInput">
-              <el-input v-model="deliveryAddress" placeholder="输入配送地址..." class="addr-input">
-                <template #prepend><el-icon><Location /></el-icon></template>
-              </el-input>
-              <el-select v-model="travelMode" style="width: 120px">
-                <el-option label="步行" value="1" />
-                <el-option label="骑行" value="2" />
-                <el-option label="驾车" value="3" />
-              </el-select>
-              <el-button type="success" @click="checkDelivery" :loading="deliveryLoading">校验</el-button>
-              <el-button circle @click="showDeliveryInput = false"><el-icon><Close /></el-icon></el-button>
-            </div>
+            <transition name="el-zoom-in-bottom">
+              <div class="delivery-bar-wrapper" v-if="showDeliveryInput">
+                <div class="delivery-bar-card">
+                  <div class="card-header">
+                    <span>设置配送地址</span>
+                    <el-button link @click="showDeliveryInput = false"><el-icon><Close /></el-icon></el-button>
+                  </div>
+                  <div class="card-body">
+                    <el-autocomplete
+                      v-model="deliveryAddress"
+                      :fetch-suggestions="querySearchTips"
+                      placeholder="请输入详细配送地址..."
+                      class="addr-input"
+                      @select="handleSelectTip"
+                      clearable
+                    >
+                      <template #prefix><el-icon><Location /></el-icon></template>
+                      <template #default="{ item }">
+                        <div class="tip-item">
+                          <div class="tip-name">{{ item.name }}</div>
+                          <div class="tip-addr">{{ item.district }}{{ item.address }}</div>
+                        </div>
+                      </template>
+                    </el-autocomplete>
+                    <div class="delivery-options">
+                      <el-select v-model="travelMode" placeholder="出行方式" style="width: 120px">
+                        <el-option label="步行" value="1" />
+                        <el-option label="骑行" value="2" />
+                        <el-option label="驾车" value="3" />
+                      </el-select>
+                      <el-button type="primary" @click="checkDelivery" :loading="deliveryLoading" block>开始校验</el-button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </transition>
             
             <div class="chat-input-wrapper">
-              <el-button circle @click="showDeliveryInput = !showDeliveryInput" :type="showDeliveryInput ? 'success' : ''">
+              <el-button 
+                circle 
+                @click="showDeliveryInput = !showDeliveryInput" 
+                :type="deliveryResponse ? (deliveryResponse.in_range ? 'success' : 'warning') : ''"
+              >
                 <el-icon><Location /></el-icon>
               </el-button>
               <el-input
@@ -150,22 +213,6 @@
                 </template>
               </el-input>
             </div>
-            
-            <!-- 配送结果小浮层 -->
-            <transition name="el-zoom-in-bottom">
-              <div v-if="deliveryResponse" class="delivery-toast">
-                <el-alert
-                  :title="deliveryResponse.message"
-                  :type="deliveryResponse.in_range ? 'success' : 'warning'"
-                  show-icon
-                  @close="deliveryResponse = null"
-                >
-                  <template #default v-if="deliveryResponse.distance">
-                    <span>{{ deliveryResponse.distance.toFixed(2) }}km | 约{{ Math.floor(deliveryResponse.duration/60) }}分钟</span>
-                  </template>
-                </el-alert>
-              </div>
-            </transition>
           </div>
         </el-main>
       </el-container>
@@ -204,7 +251,7 @@
 
 <script>
 import { ref, onMounted, computed, nextTick, watch, reactive } from 'vue'
-import { chatAPI, deliveryAPI, menuAPI } from './api/index.js'
+import { chatAPI, deliveryAPI, menuAPI, restaurantAPI } from './api/index.js'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 export default {
@@ -215,6 +262,14 @@ export default {
     const chatHistory = ref([])
     const chatLoading = ref(false)
     const chatWindow = ref(null)
+
+    const restaurantInfo = reactive({
+      name: '',
+      address: '',
+      longitude: 0,
+      latitude: 0,
+      delivery_radius: 0
+    })
 
     const deliveryAddress = ref('')
     const travelMode = ref("2")
@@ -255,8 +310,22 @@ export default {
     }
 
     const checkout = () => {
+      // 下单拦截机制：强制配送范围校验
+      if (!deliveryResponse.value) {
+        ElMessage.warning('请先设置并校验配送地址')
+        showDeliveryInput.value = true
+        return
+      }
+      
+      if (!deliveryResponse.value.in_range) {
+        ElMessage.error('当前地址超出配送范围，无法下单')
+        return
+      }
+
+      const totalWithDelivery = (parseFloat(totalPrice.value) + (deliveryResponse.value.delivery_fee || 0)).toFixed(2)
+
       ElMessageBox.confirm(
-        `确认下单吗？总计金额：¥${totalPrice.value}`,
+        `确认下单吗？\n菜品：¥${totalPrice.value}\n配送费：¥${deliveryResponse.value.delivery_fee}\n总计金额：¥${totalWithDelivery}`,
         '订单确认',
         { confirmButtonText: '确认', cancelButtonText: '取消', type: 'success' }
       ).then(() => {
@@ -374,10 +443,67 @@ export default {
       deliveryLoading.value = true
       try {
         deliveryResponse.value = await deliveryAPI.checkRange(deliveryAddress.value, travelMode.value)
+        if (deliveryResponse.value.success) {
+          showDeliveryInput.value = false // 校验成功后自动收起
+          ElMessage.success(deliveryResponse.value.in_range ? '地址校验通过' : '超出配送范围')
+        } else {
+          // 处理特定错误，如 INVALID_USER_IP
+          const errorMsg = deliveryResponse.value.message || '校验失败'
+          if (errorMsg.includes('INVALID_USER_IP')) {
+            ElMessageBox.alert(
+              '配送校验功能目前不可用，原因：高德 API 网络 IP 校验未通过。请检查高德开发者控制台的 Key 设置（白名单或服务类型）。',
+              '服务受限',
+              { type: 'error' }
+            )
+          } else {
+            ElMessage.error(errorMsg)
+          }
+        }
       } catch (error) {
         deliveryResponse.value = { success: false, in_range: false, message: '校验失败' }
       } finally {
         deliveryLoading.value = false
+      }
+    }
+
+    const querySearchTips = async (queryString, cb) => {
+      if (!queryString) {
+        cb([])
+        return
+      }
+      try {
+        const response = await deliveryAPI.getTips(queryString)
+        if (response.success && response.tips) {
+          // 格式化为 el-autocomplete 需要的格式
+          const results = response.tips.map(tip => ({
+            value: tip.name, // 必须包含 value 字段用于显示在输入框
+            ...tip
+          }))
+          cb(results)
+        } else {
+          // 如果是由于 IP 校验失败导致的，显示具体原因
+          if (response.message && response.message.includes('INVALID_USER_IP')) {
+            ElMessage.error({
+              message: '地址建议功能受限：高德 API 网络 IP 校验未通过。请联系管理员检查 API Key 的白名单设置。',
+              duration: 5000
+            })
+          }
+          cb([])
+        }
+      } catch (error) {
+        console.error('获取提示失败:', error)
+        cb([])
+      }
+    }
+
+    const handleSelectTip = (item) => {
+      deliveryAddress.value = (item.district || '') + (item.address || '') + item.name
+      if (item.location) {
+        // 如果有坐标，直接调用校验
+        checkDelivery()
+      } else {
+        // 如果没有坐标，提示用户手动补充详细地址
+        ElMessage.info('请补充详细门牌号以便精准校验')
       }
     }
 
@@ -391,6 +517,17 @@ export default {
       }
     }
 
+    const loadRestaurantInfo = async () => {
+      try {
+        const response = await restaurantAPI.getInfo()
+        if (response.success) {
+          Object.assign(restaurantInfo, response)
+        }
+      } catch (error) {
+        console.error('获取餐厅信息失败:', error)
+      }
+    }
+
     const getSpiceType = (level) => {
       return ['', 'success', 'warning', 'danger'][level] || 'info'
     }
@@ -401,13 +538,18 @@ export default {
       return `/images/${name}.png`
     }
 
-    onMounted(loadMenuItems)
+    onMounted(() => {
+      loadMenuItems()
+      loadRestaurantInfo()
+    })
 
     return {
       chatQuery, chatHistory, chatLoading, chatWindow,
       deliveryAddress, travelMode, deliveryResponse, deliveryLoading, showDeliveryInput,
       menuItems, menuLoading, highlightedItems, activeCategory, filteredMenu,
+      restaurantInfo,
       sendChatQuery, checkDelivery, loadMenuItems, getSpiceType, renderMarkdown,
+      querySearchTips, handleSelectTip,
       showCart, cart, cartCount, totalPrice, addToCart, addById, removeFromCart, checkout, getDishNameById,
       getDishImageUrl
     }
@@ -465,6 +607,12 @@ body {
   margin-right: 5px;
 }
 
+.logo-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .logo {
   display: flex;
   align-items: center;
@@ -472,6 +620,18 @@ body {
   font-size: 18px;
   font-weight: bold;
   color: var(--primary-color);
+}
+
+.restaurant-address {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-sec);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 250px;
 }
 
 .menu-filter {
@@ -562,12 +722,65 @@ body {
   flex-direction: column;
   padding: 0 !important;
   background: var(--bg-light);
+  position: relative;
+}
+
+.delivery-status-banner {
+  background: white;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border-color);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+  z-index: 10;
+  transition: all 0.3s ease;
+}
+
+.delivery-status-banner.is-active {
+  background: #f0f9eb; /* 浅绿色背景 */
+  border-bottom-color: #e1f3d8;
+}
+
+.banner-content {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  cursor: pointer;
+}
+
+.status-icon {
+  font-size: 24px;
+  color: var(--text-sec);
+}
+
+.is-active .status-icon {
+  color: #67c23a;
+}
+
+.status-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.status-text {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.status-hint {
+  font-size: 12px;
+  color: var(--text-sec);
+}
+
+.status-detail {
+  font-size: 12px;
+  color: #67c23a;
 }
 
 .chat-window {
   flex: 1;
   overflow-y: auto;
-  padding: 40px 10% 20px;
+  padding: 20px 10% 20px;
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -712,6 +925,72 @@ body {
   background: white;
   border-top: 1px solid var(--border-color);
   position: relative;
+}
+
+.delivery-bar-wrapper {
+  position: absolute;
+  bottom: 100%;
+  left: 10%;
+  right: 10%;
+  padding-bottom: 10px;
+  z-index: 100;
+}
+
+.delivery-bar-card {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 -4px 12px rgba(0,0,0,0.1);
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.delivery-bar-card .card-header {
+  padding: 10px 15px;
+  background: #f8f9fa;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.delivery-bar-card .card-body {
+  padding: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.delivery-bar-card .addr-input {
+  width: 100%;
+}
+
+.delivery-options {
+  display: flex;
+  gap: 10px;
+}
+
+.delivery-options .el-button {
+  flex: 1;
+}
+
+/* 搜索建议样式 */
+.tip-item {
+  padding: 8px 0;
+  line-height: 1.2;
+}
+
+.tip-name {
+  font-weight: bold;
+  font-size: 14px;
+  color: var(--text-main);
+}
+
+.tip-addr {
+  font-size: 12px;
+  color: var(--text-sec);
+  margin-top: 4px;
 }
 
 /* Cart Styling */

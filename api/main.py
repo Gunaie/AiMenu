@@ -55,6 +55,7 @@ class DeliveryResponse(BaseModel):
     distance: float # 配送距离(公里 km)
     formatted_address: str # 格式化地址
     duration:float # 配送时间（秒）
+    delivery_fee: Optional[float] = 0.0 # 配送费
     message: str  # (前端要展示的配送完整消息内容)
     travel_mode: PathInputModel # 配送模式 (1:步行 2:骑电动车 3:驾车)
     input_address: str # 输入原始内容
@@ -76,6 +77,34 @@ class MenuListResponse(BaseModel):
     count: int # 菜品数
     message: str # 响应消息提示
 
+# 定义餐厅信息响应模型
+class RestaurantInfoResponse(BaseModel):
+    """餐厅信息响应"""
+    success: bool
+    name: str
+    address: str
+    longitude: float
+    latitude: float
+    delivery_radius: float
+
+@app.get("/delivery/tips")
+async def delivery_tips_endpoint(keywords: str):
+    """获取地址输入建议"""
+    from tools.amap_tool import get_input_tips
+    return get_input_tips(keywords)
+
+@app.get("/restaurant/info", response_model=RestaurantInfoResponse)
+async def restaurant_info_endpoint():
+    """获取餐厅基本信息"""
+    from tools.amap_tool import config
+    return RestaurantInfoResponse(
+        success=True,
+        name="智能餐厅",
+        address=config.RESTAURANT_ADDRESS,
+        longitude=float(config.MERCHANT_LONGITUDE),
+        latitude=float(config.MERCHANT_LATITUDE),
+        delivery_radius=float(config.DELIVERY_RADIUS)
+    )
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
@@ -194,6 +223,7 @@ async def delivery_endpoint(request: DeliveryRequest):
             distance=check_delivery_range_response['distance'],
             formatted_address=check_delivery_range_response['formatted_address'],
             duration=check_delivery_range_response['duration'],
+            delivery_fee=check_delivery_range_response.get('delivery_fee', 0.0),
             message=check_delivery_range_response['message'],
             travel_mode=request.travel_mode,
             input_address=request.address

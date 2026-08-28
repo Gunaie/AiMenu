@@ -88,7 +88,9 @@ class SmartRestaurantGraph:
 3. general: 餐厅基本信息。
 4. chat: 闲聊。
 
-如果依赖上下文（如“再推荐几个”），重写为独立搜索词。
+特别要求：
+- 如果意图是 delivery，请从用户话语中提取出最核心的【地理位置名称】作为 search_query（例如：用户说“我在光谷广场”，search_query 就是“光谷广场”）。不要包含“能送吗”、“我在”等废话。
+- 如果依赖上下文（如“再推荐几个”），重写为独立搜索词。
 只返回 JSON: {"intent": "...", "search_query": "..."}"""
         
         messages = [SystemMessage(content=system_msg)] + state['messages'][-5:] # 减少历史消息数量以提速
@@ -134,11 +136,15 @@ class SmartRestaurantGraph:
                 retrieved_data = similar_result.get("contents", [])
                 menu_ids = similar_result.get("ids", [])
             elif intent == "delivery":
-                # 配送校验 (假设 query 就是地址)
-                retrieved_data = check_delivery_range(query, "2")
+                # 配送校验
+                from service.diancan_service import check_delivery_range as service_check
+                # 针对对话，直接将搜索词作为地址进行校验
+                retrieved_data = service_check(query, "2")
+                logger.info(f"LangGraph Node: data_retriever - Delivery Check Result: {retrieved_data}")
             elif intent == "general":
-                # 简单处理：可以从文件或配置读取，这里模拟检索
-                retrieved_data = "本餐厅营业时间为 9:00 - 22:00，地址位于北京市海淀区XX路，联系电话：010-12345678。"
+                # 从环境变量或配置读取
+                from tools.amap_tool import config
+                retrieved_data = f"本餐厅营业时间为 9:00 - 22:00，地址位于{config.RESTAURANT_ADDRESS}，联系电话：010-12345678。"
             
             logger.info(f"LangGraph Node: data_retriever - Done, duration: {time.time()-start_t:.4f}s")
             return {
@@ -159,6 +165,11 @@ class SmartRestaurantGraph:
         intent = state.get("intent", "chat")
         data = state.get("retrieved_data", [])
         
+        # 提取可能的错误信息
+        error_info = "未知错误"
+        if isinstance(data, dict):
+            error_info = data.get('message', '未知错误')
+        
         system_msg = f"""你是一个亲切专业的智能餐厅助手（小二）。
 任务：根据【参考数据】和【对话历史】，回答用户的【当前提问】。
 
@@ -167,7 +178,15 @@ class SmartRestaurantGraph:
 2. **多轮对话**：承接上文，不重复推荐。
 3. **数据筛选**：从数据中选出最符合要求的（如“更辣”、“素食”）。若无，则如实告知。
 4. **必须明确提及菜品名称**：在推荐时，请务必使用【参考数据】中提供的完整菜品名称，不要随意缩减或更改。
-5. 描述口感和理由，引导下单。
+5. **配送信息处理**：
+   - 如果参考数据包含 "status": "success" 且有 "in_range" 字段：
+     - 你必须根据 "in_range" (True/False) 明确告诉客官能否配送。
+     - 必须提及解析到的地址、配送距离（公里）、配送费和预估时间。
+   - 如果参考数据包含 "status": "fail"：
+     - 说明配送查询出错了。请委婉地告知客官：小店在查找地址时遇到了点麻烦（具体原因：{error_info}）。
+     - 建议客官输入更准确的地点名称，或者检查网络设置。
+   - 语气要诚恳，如果不在范围内，请礼貌致歉并解释原因。
+6. 描述口感和理由，引导下单。
 
 参考数据：
 {json.dumps(data, ensure_ascii=False) if data else "无特定数据"}

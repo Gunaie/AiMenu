@@ -17,6 +17,7 @@ import requests
 import json
 import os
 from dotenv import load_dotenv
+from tools.redis_tool import cache
 
 load_dotenv()
 
@@ -53,6 +54,7 @@ class PathModeConverter:
 @dataclass  # 快速的对对象做一些赋值(重复工作少做）
 class AmapConfig:
     AMAP_API_KEY: str = os.getenv("AMAP_API_KEY")
+    RESTAURANT_ADDRESS: str = os.getenv("RESTAURANT_ADDRESS", "北京市昌平区宏福科技园")
     MERCHANT_LONGITUDE: str = os.getenv("MERCHANT_LONGITUDE")
     MERCHANT_LATITUDE: str = os.getenv("MERCHANT_LATITUDE")
     DELIVERY_RADIUS: int = int(os.getenv("DELIVERY_RADIUS"))
@@ -93,17 +95,33 @@ def create_session_with_retries():
 
 def safe_request(base_url: str, params: dict) -> Optional[Dict]:
     """安全的HTTP请求，处理重试和SSL降级"""
-    # HTTPS(加密)协议请求：1.ssl协议过期了或者错误--->降级HTTP协议  2.HTTPS协议的网络连接没建立 建立网络连接超时了 读取超时
-
+    
     # 1. 获取到带重试机制的session对象
     session = create_session_with_retries()
+    
+    # 增强请求头，模拟合法的 Web 服务请求
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://lbs.amap.com/"  # 模拟来自高德官方文档或合法站点的引用
+    }
+    
     try:
         # 2.发送请求
-        response = session.get(url=base_url, params=params, timeout=10)
-
-        response.raise_for_status()  # 遇到【400 600) 状态码 都会raise抛出异常
-
-        return response.json()  # 将网络传输的字节反序列化成字典对象。【字节--->对象：方便应用程序处理】反序列化 序列化【对象--->字节（网络传输、IO读写）】
+        response = session.get(url=base_url, params=params, headers=headers, timeout=10)
+        
+        # 高德 API 即使 IP 校验失败也会返回 200 OK，但内容包含错误码
+        data = response.json()
+        if data.get('info') == 'INVALID_USER_IP' or data.get('infocode') == '10001':
+            logging.error(f"高德 API 报错: INVALID_USER_IP。当前服务器 IP 未在 Key 的白名单内，或者 Key 类型不匹配。")
+            return {
+                "status": "0",
+                "info": "INVALID_USER_IP",
+                "infocode": "10001",
+                "detail_message": "网络IP验证未通过。请检查高德开发者控制台：1. Key是否绑定了特定IP；2. Key的服务类型是否为'Web服务'；3. 是否开启了数字签名但未传sig。"
+            }
+        
+        response.raise_for_status()
+        return data
     except requests.exceptions.SSLError as e:
         # 2.发送请求
         try:
@@ -133,6 +151,13 @@ def geocode_address(address: str) -> Dict[str, Any]:
     Returns:
         Dict: 地理编码结果 包含格式化后的地址、经纬度
    """
+    # 尝试从缓存获取
+    cache_key = f"geocode:{address}"
+    cached_data = cache.get(cache_key)
+    if cached_data:
+        logging.info(f"Redis 命中 [地理编码]: {address}")
+        return cached_data
+
     try:
         # 1.构建请求URL
         request_url = "https://restapi.amap.com/v3/geocode/geo"
@@ -140,7 +165,8 @@ def geocode_address(address: str) -> Dict[str, Any]:
         # 2.构建请求param
         params = {
             "address": address,
-            "key": config.AMAP_API_KEY
+            "key": config.AMAP_API_KEY,
+            "city": "武汉"  # 限制在武汉市，防止搜到西藏或重庆去
         }
 
         # 3.发送请求,得到响应
@@ -148,19 +174,28 @@ def geocode_address(address: str) -> Dict[str, Any]:
 
         # 4.根据响应，解析结果
         # 4.1 失败
-        if response['status'] != "1":
+        if response.get('status') != "1":
             return {
                 "success": False,
-                "message": response['info']
+                "message": response.get('detail_message') or response.get('info')
             }
 
         # 4.2 成功 # 提取地址编码信息列表
+        if not response.get('geocodes'):
+            return {
+                "success": False,
+                "message": "未能识别该地址，请客官输入更详细的地点（例如：光谷步行街、武汉大学正门）。"
+            }
         geocodes = response['geocodes'][0]
-        return {
+        result = {
             "formatted_address": geocodes['formatted_address'],
             "location": geocodes['location'],
             "success": True,
         }
+        
+        # 写入缓存 (有效期 24 小时)
+        cache.set(cache_key, result, expire=86400)
+        return result
 
     except Exception as e:
         logging.error(f"调用高德地图进行地理位置编码失败,原因:{e}")
@@ -181,6 +216,13 @@ def calculate_distance(origin_location: str, destination_location: str,
         Dict: 路径结果，包含路径模式、距离、预计时间等
 
     """
+    # 尝试从缓存获取
+    cache_key = f"dist:{origin_location}:{destination_location}:{path_mode_input}"
+    cached_data = cache.get(cache_key)
+    if cached_data:
+        logging.info(f"Redis 命中 [距离计算]: {origin_location} -> {destination_location}")
+        return cached_data
+
     try:
         # 1.计算高德的API_KEY
         if config.AMAP_API_KEY is None:
@@ -210,23 +252,100 @@ def calculate_distance(origin_location: str, destination_location: str,
         response = safe_request(path_endpoint[inner_model], params)
         # 6.解析响应结果
         # 6.1 失败
-        if response['status'] != "1":
+        if response.get('status') != "1":
             return {
                 "success": False,
-                "message": response['info']
+                "message": response.get('detail_message') or response.get('info')
             }
 
         # 6.2
         path = response['route']["paths"][0]
         duration = path['duration'] if inner_model == "electrobike" else path['cost']['duration']
-        return {
+        result = {
             "distance": int(path["distance"]),  # 两点之间距离
             "duration": duration,  # 两点之间某一种路径规划下的时间
             "success": True  # 状态
         }
+        
+        # 写入缓存 (有效期 1 小时)
+        cache.set(cache_key, result, expire=3600)
+        return result
     except Exception as e:
         logging.error(f"调用高德地图进行路径规划失败,原因:{e}")
         raise e
+
+
+def get_input_tips(keywords: str) -> Dict[str, Any]:
+    """获取地址输入提示
+
+    Args:
+        keywords: 输入的关键字
+    Returns:
+        提示结果列表
+    """
+    # 尝试从缓存获取
+    cache_key = f"tips:{keywords}"
+    cached_data = cache.get(cache_key)
+    if cached_data:
+        logging.info(f"Redis 命中 [地址提示]: {keywords}")
+        return cached_data
+
+    try:
+        request_url = "https://restapi.amap.com/v3/assistant/inputtips"
+        params = {
+            "key": config.AMAP_API_KEY,
+            "keywords": keywords,
+            # 暂时移除 location 参数以规避“无效IP”报错，高德 API 在没有 location 时会进行全国搜索
+            # "location": f"{config.MERCHANT_LONGITUDE},{config.MERCHANT_LATITUDE}",
+            "datatype": "all"
+        }
+        response = safe_request(request_url, params)
+
+        if response.get('status') != "1":
+            return {
+                "success": False, 
+                "message": response.get('detail_message') or response.get('info')
+            }
+
+        # 3.成功提示
+        tips = []
+        for tip in response.get('tips', []):
+            # 兼容处理：高德 API 返回的 location 可能是空列表 [] 或 字符串
+            loc = tip.get('location')
+            if isinstance(loc, str) and loc:
+                tips.append({
+                    "name": tip.get('name'),
+                    "district": tip.get('district'),
+                    "address": tip.get('address'),
+                    "location": loc
+                })
+            elif isinstance(loc, list) and len(loc) > 0:
+                # 某些情况下返回的是坐标数组
+                tips.append({
+                    "name": tip.get('name'),
+                    "district": tip.get('district'),
+                    "address": tip.get('address'),
+                    "location": f"{loc[0]},{loc[1]}"
+                })
+            else:
+                # 即使没有经纬度，也返回给前端展示，只是无法直接校验
+                tips.append({
+                    "name": tip.get('name'),
+                    "district": tip.get('district'),
+                    "address": tip.get('address'),
+                    "location": None
+                })
+
+        result = {
+            "success": True,
+            "tips": tips
+        }
+        # 写入缓存 (有效期 1 小时)
+        cache.set(cache_key, result, expire=3600)
+        return result
+    except Exception as e:
+        logging.error(f"获取输入提示失败,原因:{e}")
+        return {"success": False, "message": str(e)}
 
 
 def check_delivery_range(address: str, path_mode_input: PathInputModel = None) -> Dict[str, Any]:
@@ -263,17 +382,31 @@ def check_delivery_range(address: str, path_mode_input: PathInputModel = None) -
             }
 
         # 两点之间的距离 时间 是否在配送范围之类  格式化的地址 message=[当前地址+之间距离+时间+在（不在）范围之内]
-        distance =calculate_distance_result['distance']  # 2000
+        distance = calculate_distance_result['distance']  # 米
         in_range = distance <= config.DELIVERY_RADIUS
+        
+        # 配送费计算逻辑 (阶梯式)
+        # 1km内免费，1-3km收3元，3km以上每公里加2元
+        delivery_fee = 0.0
+        dist_km = distance / 1000
+        if dist_km <= 1.0:
+            delivery_fee = 0.0
+        elif dist_km <= 3.0:
+            delivery_fee = 3.0
+        else:
+            delivery_fee = 3.0 + (dist_km - 3.0) * 2.0
+        
         return {
             "status": "success",
             "in_range": in_range,  # 是否在配送范围之内
-            "distance":round(distance/1000,2) ,  # 距离
+            "distance": round(dist_km, 2),  # 距离公里
             "duration": int(calculate_distance_result['duration']),
+            "delivery_fee": round(delivery_fee, 1), # 配送费
             "formatted_address": geocode_result['formatted_address'],
             "message": (
                 f"配送地址：{geocode_result['formatted_address']}\n"
-                f"配送距离：{distance/1000:.2f}公里\n"
+                f"配送距离：{dist_km:.2f}公里\n"
+                f"配送费：￥{delivery_fee:.1f}\n"
                 f"配送状态：{'在配送范围内' if in_range else '超出配送范围'}"
             )
         }
