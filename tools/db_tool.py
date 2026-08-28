@@ -295,6 +295,59 @@ def get_menu_items() -> List[Dict[str, Any]]:
         return []
 
 
+def update_menu_item(dish_id: int, update_data: Dict[str, Any]) -> bool:
+    """
+    更新菜品信息，并应用 Redis 缓存“延迟双删”策略保证一致性
+    :param dish_id: 菜品ID
+    :param update_data: 需要更新的字段字典
+    :return: 是否更新成功
+    """
+    cache_key = "menu:all_items"
+    
+    try:
+        # 1. 第一删：先删除缓存
+        cache.delete(cache_key)
+        logger.info(f"一致性策略 - 第一删成功: {cache_key}")
+
+        # 2. 更新数据库
+        with DataBaseConnection() as db:
+            if not update_data:
+                return False
+            
+            set_clause = ", ".join([f"{k} = %s" for k in update_data.keys()])
+            values = list(update_data.values())
+            values.append(dish_id)
+            
+            sql = f"UPDATE menu_items SET {set_clause} WHERE id = %s"
+            db.cursor.execute(sql, tuple(values))
+            db.commit()
+            
+            if db.cursor.rowcount == 0:
+                logger.warning(f"未找到 ID 为 {dish_id} 的菜品，更新失败")
+                return False
+
+        logger.info(f"数据库更新成功: dish_id={dish_id}")
+
+        # 3. 延迟双删：休眠一小段时间后再次删除缓存
+        # 在高并发环境下，这能防止在数据库更新期间有其他请求将旧数据重新载入缓存
+        import time
+        import threading
+
+        def delayed_delete():
+            time.sleep(2)  # 延迟 2 秒
+            cache.delete(cache_key)
+            logger.info(f"一致性策略 - 第二删成功: {cache_key}")
+
+        # 异步执行第二删，避免阻塞主流程
+        threading.Thread(target=delayed_delete).start()
+
+        return True
+
+    except Exception as e:
+        logger.error(f"更新菜品失败，原因: {e}")
+        return False
+
+
 def test_connection():
     with DataBaseConnection() as db:
 

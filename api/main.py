@@ -6,13 +6,22 @@
 2.2 POST /delivery - 配送查询接口
 2.3 GET /menu/list - 菜品列表接口
 """
-from  fastapi import  FastAPI, HTTPException
+from  fastapi import  FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import List,Optional
 from tools.amap_tool import PathInputModel
 import  logging
+import  time
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def send_notification(order_no: str):
+    """模拟异步发送订单通知（如邮件或微信推送）"""
+    logger.info(f"开始为订单 {order_no} 准备通知推送...")
+    time.sleep(3)  # 模拟耗时操作
+    logger.info(f"订单 {order_no} 通知推送成功！")
+
 app=FastAPI(title="智能点餐助手的API接口",description="智能点餐应用主要暴露三个接口分别为智能对话接口、配送查询接口、菜品列表接口")
 
 @app.on_event("startup")
@@ -280,10 +289,15 @@ async def delivery_endpoint(request: DeliveryRequest):
 
 
 @app.post("/order/submit", response_model=ActionResponse)
-async def order_submit_endpoint(request: OrderSubmitRequest):
+async def order_submit_endpoint(request: OrderSubmitRequest, background_tasks: BackgroundTasks):
     """提交订单接口"""
     from service.diancan_service import submit_order
     result = submit_order(request.dict())
+    
+    # 添加后台任务：发送通知
+    if result.get("success") and result.get("order_no"):
+        background_tasks.add_task(send_notification, result["order_no"])
+        
     return ActionResponse(**result)
 
 

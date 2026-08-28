@@ -135,7 +135,7 @@ export const orderAPI = {
 export const healthAPI = {
   // 检查服务状态
   checkHealth: async () => {
-    return await api.get('/health')
+    return await api.get('/healthy')
   }
 }
 

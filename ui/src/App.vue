@@ -979,6 +979,12 @@ body {
   position: relative;
 }
 
+.chat-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .delivery-bar-wrapper {
   position: absolute;
   bottom: 100%;
