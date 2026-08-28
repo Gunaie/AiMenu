@@ -164,6 +164,22 @@ def get_order(order_no: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def get_all_orders(limit: int = 10) -> List[Dict[str, Any]]:
+    """查询所有订单列表（按时间倒序）"""
+    try:
+        with DataBaseConnection() as db:
+            query_sql = "SELECT * FROM orders ORDER BY created_at DESC LIMIT %s"
+            db.cursor.execute(query_sql, (limit,))
+            orders = db.cursor.fetchall()
+            for order in orders:
+                if 'items_detail' in order:
+                    order['items_detail'] = json.loads(order['items_detail'])
+            return orders
+    except Exception as e:
+        logger.error(f"查询订单列表失败: {e}")
+        return []
+
+
 def get_all_menu_items() -> str:
     """
     作用：查询menu_items中所有的菜品信息，并且对每一条菜品信息用\n连接，最终形成一个大字符串（向量化）

@@ -111,13 +111,28 @@ def safe_request(base_url: str, params: dict) -> Optional[Dict]:
         
         # 高德 API 即使 IP 校验失败也会返回 200 OK，但内容包含错误码
         data = response.json()
-        if data.get('info') == 'INVALID_USER_IP' or data.get('infocode') == '10001':
-            logging.error(f"高德 API 报错: INVALID_USER_IP。当前服务器 IP 未在 Key 的白名单内，或者 Key 类型不匹配。")
+        
+        # 统一拦截并翻译高德原始错误码
+        if data.get('status') == '0':
+            info = data.get('info', '')
+            infocode = data.get('infocode', '')
+            
+            friendly_messages = {
+                'INVALID_USER_IP': "网络环境不稳定，小店暂时没法定位您的位置（IP验证失败），请检查网络后重试哦。",
+                'ENGINE_RESPONSE_DATA_ERROR': "小二在查询路线时，地图系统开了个小差（引擎数据异常），建议您输入更精准的地标试试。",
+                'USER_DAILY_QUERY_OVER_LIMIT': "今天查地址的客官实在太多啦，小店的地图流量用完啦，请明天再来吧。",
+                'INVALID_USER_KEY': "小店的地图授权过期了，请客官联系老板修复（Key无效）。",
+                'INVALID_PARAMS': "参数格式好像不太对，小二有点糊涂了，请客官再说一遍地点试试？"
+            }
+            
+            error_msg = friendly_messages.get(info) or friendly_messages.get(infocode) or f"地图服务暂时不可用（{info}）"
+            
+            logging.error(f"高德 API 报错: {info} ({infocode})")
             return {
                 "status": "0",
-                "info": "INVALID_USER_IP",
-                "infocode": "10001",
-                "detail_message": "网络IP验证未通过。请检查高德开发者控制台：1. Key是否绑定了特定IP；2. Key的服务类型是否为'Web服务'；3. 是否开启了数字签名但未传sig。"
+                "info": info,
+                "infocode": infocode,
+                "detail_message": error_msg
             }
         
         response.raise_for_status()

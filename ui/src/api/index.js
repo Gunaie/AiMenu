@@ -128,6 +128,10 @@ export const orderAPI = {
   // 模拟支付
   payOrder: async (orderNo) => {
     return await api.post(`/order/pay/${orderNo}`)
+  },
+  // 获取订单列表
+  getOrderList: async (limit = 10) => {
+    return await api.get('/order/list', { params: { limit } })
   }
 }
 

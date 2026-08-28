@@ -309,5 +309,13 @@ async def order_pay_endpoint(order_no: str):
     return ActionResponse(**result)
 
 
+@app.get("/order/list")
+async def order_list_endpoint(limit: int = 10):
+    """获取订单历史列表"""
+    from tools.db_tool import get_all_orders
+    orders = get_all_orders(limit)
+    return {"success": True, "orders": orders}
+
+
 
 

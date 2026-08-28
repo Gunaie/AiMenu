@@ -15,6 +15,9 @@
             </div>
           </div>
           <div class="header-actions">
+            <el-button type="primary" link @click="openOrders">
+              <el-icon size="20"><List /></el-icon>
+            </el-button>
             <el-badge :value="cartCount" :hidden="cartCount === 0" class="cart-badge">
               <el-button type="primary" link @click="showCart = true">
                 <el-icon size="20"><ShoppingCart /></el-icon>
@@ -246,6 +249,47 @@
         <el-empty v-else description="购物车还是空的" />
       </div>
     </el-drawer>
+
+    <!-- 订单历史抽屉 -->
+    <el-drawer
+      v-model="showOrders"
+      title="订单历史"
+      direction="rtl"
+      size="450px"
+    >
+      <div class="orders-container" v-loading="ordersLoading">
+        <div v-if="ordersList.length > 0" class="orders-list">
+          <div v-for="order in ordersList" :key="order.id" class="order-card">
+            <div class="order-header">
+              <span class="order-no">{{ order.order_no }}</span>
+              <el-tag :type="getOrderStatusTag(order.order_status)" size="small">
+                {{ getOrderStatusText(order.order_status) }}
+              </el-tag>
+            </div>
+            <div class="order-time">{{ formatDate(order.created_at) }}</div>
+            <div class="order-items">
+              <div v-for="item in order.items_detail" :key="item.id" class="order-item-row">
+                <span>{{ item.dish_name }} x {{ item.quantity }}</span>
+                <span>¥{{ (item.price * item.quantity).toFixed(2) }}</span>
+              </div>
+            </div>
+            <div class="order-footer">
+              <div class="order-address">
+                <el-icon><Location /></el-icon>
+                <span>{{ order.delivery_address }}</span>
+              </div>
+              <div class="order-total">
+                总额: <span class="amount">¥{{ order.actual_amount }}</span>
+              </div>
+            </div>
+            <div class="order-actions" v-if="order.payment_status === 'unpaid'">
+              <el-button type="primary" size="small" @click="handlePayment(order.order_no)">立即支付</el-button>
+            </div>
+          </div>
+        </div>
+        <el-empty v-else description="暂无订单记录" />
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -281,6 +325,11 @@ export default {
     const menuLoading = ref(false)
     const highlightedItems = ref([])
     const activeCategory = ref('全部')
+
+    // 订单历史相关
+    const showOrders = ref(false)
+    const ordersList = ref([])
+    const ordersLoading = ref(false)
 
     // 购物车相关
     const showCart = ref(false)
@@ -378,6 +427,8 @@ export default {
           ElMessage.success('支付成功！餐厅正在为您准备菜品')
           cart.value = []
           showCart.value = false
+          // 如果订单列表已打开，刷新列表
+          if (showOrders.value) loadOrders()
         } else {
           ElMessage.error(res.message || '支付失败')
         }
@@ -385,6 +436,57 @@ export default {
         loading.close()
         ElMessage.error('支付处理异常')
       }
+    }
+
+    const openOrders = () => {
+      showOrders.value = true
+      loadOrders()
+    }
+
+    const loadOrders = async () => {
+      ordersLoading.value = true
+      try {
+        const res = await orderAPI.getOrderList()
+        if (res.success) {
+          ordersList.value = res.orders
+        }
+      } catch (error) {
+        console.error('获取订单列表失败:', error)
+      } finally {
+        ordersLoading.value = false
+      }
+    }
+
+    const getOrderStatusTag = (status) => {
+      const tags = {
+        'pending': 'warning',
+        'paid': 'success',
+        'completed': 'info',
+        'cancelled': 'danger'
+      }
+      return tags[status] || 'info'
+    }
+
+    const getOrderStatusText = (status) => {
+      const texts = {
+        'pending': '待支付',
+        'paid': '制作中',
+        'completed': '已完成',
+        'cancelled': '已取消'
+      }
+      return texts[status] || status
+    }
+
+    const formatDate = (dateStr) => {
+      if (!dateStr) return ''
+      const date = new Date(dateStr)
+      return date.toLocaleString('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      })
     }
 
     const getDishNameById = (id) => {
@@ -603,7 +705,8 @@ export default {
       sendChatQuery, checkDelivery, loadMenuItems, getSpiceType, renderMarkdown,
       querySearchTips, handleSelectTip,
       showCart, cart, cartCount, totalPrice, addToCart, addById, removeFromCart, checkout, getDishNameById,
-      getDishImageUrl
+      getDishImageUrl,
+      showOrders, ordersList, ordersLoading, openOrders, getOrderStatusTag, getOrderStatusText, formatDate
     }
   }
 }
@@ -1107,5 +1210,85 @@ body {
   width: 100%;
   margin-top: 20px;
   padding: 12px;
+}
+
+/* Orders Styling */
+.orders-container {
+  padding: 0 15px;
+  height: 100%;
+}
+
+.order-card {
+  background: #fff;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 15px;
+  margin-bottom: 20px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.02);
+}
+
+.order-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.order-no {
+  font-family: monospace;
+  font-size: 13px;
+  color: var(--text-sec);
+}
+
+.order-time {
+  font-size: 12px;
+  color: #999;
+  margin-bottom: 12px;
+}
+
+.order-items {
+  background: #f9f9f9;
+  padding: 10px;
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+
+.order-item-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  margin-bottom: 5px;
+}
+
+.order-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.order-address {
+  font-size: 12px;
+  color: var(--text-sec);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 60%;
+}
+
+.order-total {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.order-total .amount {
+  color: #f56c6c;
+}
+
+.order-actions {
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid #f0f0f0;
+  padding-top: 12px;
 }
 </style>
