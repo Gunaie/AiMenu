@@ -22,6 +22,7 @@ class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
     menu_ids: List[str]   # 推荐的菜品ID（用于前端高亮）
     final_response: str   # 最终聚合的回复内容
+    user_info: Optional[Dict[str, Any]] # 当前用户信息
 
 class SmartRestaurantGraph:
     def __init__(self):
@@ -86,50 +87,56 @@ class SmartRestaurantGraph:
         start_t = time.time()
         logger.info("LangGraph Node: agent - Start")
         
+        user_info = state.get("user_info")
+        user_context = ""
+        if user_info:
+            user_context = f"\n当前登录客官信息：\n- 昵称：{user_info.get('nickname')}\n- 用户ID：{user_info.get('id')}\n请在回复中优先使用昵称称呼客官，并表现出对老顾客的亲切感。"
+
         # 系统提示词：定义角色和行为规范
-        system_prompt = """你是一个亲切专业的智能餐厅助手（小二）。
+        system_prompt = f"""你是一个亲切专业的智能餐厅助手（小二）。
 任务：利用提供的【工具】获取信息，并以热情、地道的口吻回答客官的问题。
+{user_context}
 
 准则：
 1. **角色定位**：自称“小二”，称呼用户为“客官”。语气亲切，适当使用“好嘞”、“客官您慢看”等表达。
 2. **工具使用优先级（极其重要）**：
-   - **查订单状态/进度/我的单子**：必须调用 `query_order`。即使客官只说了“我的订单怎么样了”，也要直接调用它，工具会自动识别最近的订单。**严禁此时调用配送校验工具**。
-   - **查配送范围/能否送达**：仅当客官询问“能否送到某地”或“配送费多少”且明确提到了一个【地点】时，才调用 `check_delivery`。如果没提地点，请礼貌询问地点。
+   - **查订单状态/进度/我的单子**：必须调用 `query_order`。调用时系统会自动处理权限，你只需在需要时传入 user_id 参数（如果已知）。
+   - **查配送范围/能否送达**：仅当客官询问“能否送到某地”或“配送费多少”且明确提到了一个【地点】时，才调用 `check_delivery`。
    - **寻找菜品/推荐/口味**：使用 `search_menu`。
 3. **意图区分示例**：
    - 用户：“我刚才的订单怎么样了” -> **调用 `query_order()`**。
    - 用户：“光谷地铁站能送到吗” -> **调用 `check_delivery(address='光谷地铁站')`**。
-   - 用户：“这里能送到吗” -> 回复：“客官，请告诉小二一个具体的地点，小二马上帮您核实”。
 4. **多轮对话**：承接上文，不重复啰嗦。
 5. **菜品高亮**：当你向客官推荐或提到具体菜品时，请务必直接说出【参考数据】中的完整菜名。
 6. **逻辑闭环**：如果获取到的数据为空或失败，如实告知客官并提供备选建议。
 """
         
+        # 针对 Tool Calling 注入 user_id
+        # 如果有工具调用，我们手动为 query_order 注入 user_id
+        # 这里通过 prompt 告诉模型 user_id，或者在 tools 节点处理
+        # 简单起见，在 system_prompt 中明确告知 user_id
+        if user_info:
+            system_prompt += f"\n重要：调用 query_order 时，请务必传入参数 user_id={user_info.get('id')}。"
+
         # 构建消息列表
         messages = [SystemMessage(content=system_prompt)] + state['messages']
         
         # 调用 LLM（带工具绑定）
-        # 针对流式回复，只有在非工具调用时才打标 responder_llm 标签
         response = await self.llm_with_tools.ainvoke(messages, config=config)
         
-        # 提取推荐的菜品 ID (基于正则匹配回复内容)
-        # 注意：这里需要根据 LLM 的最终 AIMessage 来提取
+        # 提取推荐的菜品 ID
         recommended_ids = []
         if not response.tool_calls:
-            # 只有在最终回复阶段才进行 ID 提取
-            # 逻辑：从 ToolMessage 的结果中反查菜品 ID
             for msg in state['messages']:
                 if isinstance(msg, ToolMessage) and "search_menu" in msg.name:
                     try:
                         data = json.loads(msg.content)
                         if data.get("success") and data.get("contents"):
                             for i, content in enumerate(data["contents"]):
-                                # 简单正则匹配内容中的菜名是否出现在最终回复中
                                 name_match = re.search(r"菜品名称:([^|]+)", content)
                                 if name_match:
                                     dish_name = name_match.group(1).strip()
                                     if dish_name in response.content:
-                                        # 假设 contents 和 menu_ids 顺序一致
                                         if i < len(data.get("menu_ids", [])):
                                             recommended_ids.append(str(data["menu_ids"][i]))
                     except:
@@ -139,19 +146,24 @@ class SmartRestaurantGraph:
         return {
             "messages": [response],
             "menu_ids": recommended_ids,
-            "final_response": response.content if not response.tool_calls else ""
+            "final_response": response.content if not response.tool_calls else "",
+            "user_info": user_info
         }
 
-    async def astream_run(self, user_query: str, thread_id: str = "default"):
+    async def astream_run(self, user_query: str, session_id: str = "default", user_info: Dict[str, Any] = None):
         """异步流式运行"""
-        config = {"configurable": {"thread_id": thread_id}}
+        config = {"configurable": {"thread_id": session_id}}
         
-        logger.info(f"LangGraph (Tool-Calling) astream_run start: {user_query}")
-        has_sent_content = False
+        initial_state = {
+            "messages": [HumanMessage(content=user_query)],
+            "user_info": user_info
+        }
+        
+        logger.info(f"LangGraph (Tool-Calling) astream_run start: {user_query} (user: {user_info.get('username') if user_info else 'Guest'})")
         
         try:
             async for event in self.app.astream_events(
-                {"messages": [HumanMessage(content=user_query)]},
+                initial_state,
                 config=config,
                 version="v2"
             ):
@@ -185,11 +197,17 @@ class SmartRestaurantGraph:
             logger.error(f"LangGraph astream_run error: {e}")
             yield {"type": "error", "content": f"小二忙不过来了，请客官稍后再试。(错误详情: {str(e)})"}
 
-    async def run(self, user_query: str, thread_id: str = "default"):
+    async def run(self, user_query: str, session_id: str = "default", user_info: Dict[str, Any] = None):
         """同步运行流程"""
-        config = {"configurable": {"thread_id": thread_id}}
+        config = {"configurable": {"thread_id": session_id}}
+        
+        initial_state = {
+            "messages": [HumanMessage(content=user_query)],
+            "user_info": user_info
+        }
+        
         final_state = await self.app.ainvoke(
-            {"messages": [HumanMessage(content=user_query)]}, 
+            initial_state, 
             config=config
         )
         

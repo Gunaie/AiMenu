@@ -6,15 +6,54 @@
 2.2 POST /delivery - 配送查询接口
 2.3 GET /menu/list - 菜品列表接口
 """
-from  fastapi import  FastAPI, HTTPException, BackgroundTasks
+from  fastapi import  FastAPI, HTTPException, BackgroundTasks, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
-from typing import List,Optional
+from typing import List,Optional, Dict, Any
 from tools.amap_tool import PathInputModel
+from tools.auth_tool import (
+    get_password_hash, verify_password, create_access_token, decode_access_token
+)
+from tools.db_tool import get_user_by_username, create_user
 import  logging
 import  time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# OAuth2 配置
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    """获取当前登录用户的依赖项 (强制登录)"""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="登录已过期，请重新登录",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    payload = decode_access_token(token)
+    if payload is None:
+        raise credentials_exception
+    username: str = payload.get("sub")
+    if username is None:
+        raise credentials_exception
+    user = get_user_by_username(username)
+    if user is None:
+        raise credentials_exception
+    return user
+
+async def get_optional_user(token: str = Depends(oauth2_scheme)) -> Optional[dict]:
+    """获取当前登录用户的依赖项 (可选登录)"""
+    try:
+        payload = decode_access_token(token)
+        if payload is None:
+            return None
+        username: str = payload.get("sub")
+        if username is None:
+            return None
+        return get_user_by_username(username)
+    except:
+        return None
 
 def send_notification(order_no: str):
     """模拟异步发送订单通知（如邮件或微信推送）"""
@@ -139,6 +178,69 @@ class ActionResponse(BaseModel):
     message: str
     order_no: Optional[str] = None
 
+# ====================== 认证相关接口 ======================
+
+class UserRegister(BaseModel):
+    username: str
+    password: str
+    nickname: Optional[str] = None
+    phone: Optional[str] = None
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    username: str
+    nickname: str
+
+@app.post("/auth/register", response_model=ActionResponse)
+async def register(user_in: UserRegister):
+    """用户注册"""
+    existing_user = get_user_by_username(user_in.username)
+    if existing_user:
+        return ActionResponse(success=False, message="用户名已存在")
+    
+    user_data = {
+        "username": user_in.username,
+        "password_hash": get_password_hash(user_in.password),
+        "nickname": user_in.nickname or user_in.username,
+        "phone": user_in.phone
+    }
+    
+    if create_user(user_data):
+        return ActionResponse(success=True, message="注册成功，请登录")
+    return ActionResponse(success=False, message="注册失败，请稍后再试")
+
+@app.post("/auth/login", response_model=Token)
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """用户登录"""
+    user = get_user_by_username(form_data.username)
+    if not user or not verify_password(form_data.password, user['password_hash']):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户名或密码错误",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    access_token = create_access_token(data={"sub": user['username']})
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer",
+        "username": user['username'],
+        "nickname": user['nickname'] or user['username']
+    }
+
+@app.get("/auth/me")
+async def get_me(current_user: dict = Depends(get_current_user)):
+    """获取当前用户信息"""
+    return {
+        "success": True,
+        "username": current_user['username'],
+        "nickname": current_user['nickname'],
+        "phone": current_user['phone']
+    }
+
+# ====================== 业务逻辑接口 ======================
+
 @app.get("/delivery/tips")
 async def delivery_tips_endpoint(keywords: str):
     """获取地址输入建议"""
@@ -159,15 +261,15 @@ async def restaurant_info_endpoint():
     )
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
+async def chat_endpoint(request: ChatRequest, current_user: dict = Depends(get_optional_user)):
     """
-    智能对话接口 (非流式)
+    智能对话接口 (支持个性化)
     """
     try:
         from  service.diancan_service import smart_chat
-
-        # 调用智能对话服务
-        result = await smart_chat(request.query, request.session_id)
+        
+        # 调用智能对话服务，传入用户信息
+        result = await smart_chat(request.query, request.session_id, user_info=current_user)
 
         # 处理不同类型的返回值
         if isinstance(result, dict) and "recommendation" in result and "menu_ids" in result:
@@ -193,19 +295,18 @@ async def chat_endpoint(request: ChatRequest):
         )
 
 @app.post("/chat/stream")
-async def chat_stream_endpoint(request: ChatRequest):
+async def chat_stream_endpoint(request: ChatRequest, current_user: dict = Depends(get_optional_user)):
     """
-    智能对话接口 (流式输出)
+    智能对话接口 (流式输出，支持个性化)
     """
     from agent.assistant import chat_with_assistant_stream
     from fastapi.responses import StreamingResponse
     import json
 
     async def event_generator():
-        async for chunk in chat_with_assistant_stream(request.query, request.session_id):
+        async for chunk in chat_with_assistant_stream(request.query, request.session_id, user_info=current_user):
             # 以 Server-Sent Events (SSE) 格式发送
             data = json.dumps(chunk, ensure_ascii=False)
-            # logger.info(f"SSE Yield: {data}")
             yield f"data: {data}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
@@ -289,10 +390,17 @@ async def delivery_endpoint(request: DeliveryRequest):
 
 
 @app.post("/order/submit", response_model=ActionResponse)
-async def order_submit_endpoint(request: OrderSubmitRequest, background_tasks: BackgroundTasks):
-    """提交订单接口"""
+async def order_submit_endpoint(
+    request: OrderSubmitRequest, 
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user)
+):
+    """提交订单接口 (需要登录)"""
     from service.diancan_service import submit_order
-    result = submit_order(request.dict())
+    order_data = request.dict()
+    order_data['user_id'] = current_user['id']  # 绑定当前用户
+    
+    result = submit_order(order_data)
     
     # 添加后台任务：发送通知
     if result.get("success") and result.get("order_no"):
@@ -302,18 +410,19 @@ async def order_submit_endpoint(request: OrderSubmitRequest, background_tasks: B
 
 
 @app.post("/order/pay/{order_no}", response_model=ActionResponse)
-async def order_pay_endpoint(order_no: str):
-    """模拟支付接口"""
+async def order_pay_endpoint(order_no: str, current_user: dict = Depends(get_current_user)):
+    """模拟支付接口 (需要登录)"""
     from service.diancan_service import pay_order
+    # 这里可以增加权限校验，确保订单属于当前用户
     result = pay_order(order_no)
     return ActionResponse(**result)
 
 
 @app.get("/order/list")
-async def order_list_endpoint(limit: int = 10):
-    """获取订单历史列表"""
+async def order_list_endpoint(limit: int = 10, current_user: dict = Depends(get_current_user)):
+    """获取当前用户的订单历史列表"""
     from tools.db_tool import get_all_orders
-    orders = get_all_orders(limit)
+    orders = get_all_orders(user_id=current_user['id'], limit=limit)
     return {"success": True, "orders": orders}
 
 

@@ -80,11 +80,26 @@ def init_db():
     """初始化数据库表结构"""
     try:
         with DataBaseConnection() as db:
-            # 创建订单表
+            # 1. 创建用户表
+            create_users_sql = """
+            CREATE TABLE IF NOT EXISTS users (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(50) NOT NULL UNIQUE,
+                password_hash VARCHAR(255) NOT NULL,
+                nickname VARCHAR(50),
+                phone VARCHAR(20),
+                avatar VARCHAR(255),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """
+            db.cursor.execute(create_users_sql)
+            
+            # 2. 创建订单表 (增加 user_id 外键)
             create_orders_sql = """
             CREATE TABLE IF NOT EXISTS orders (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 order_no VARCHAR(50) NOT NULL UNIQUE,
+                user_id INT,
                 total_amount DECIMAL(10, 2) NOT NULL,
                 delivery_fee DECIMAL(10, 2) NOT NULL,
                 actual_amount DECIMAL(10, 2) NOT NULL,
@@ -92,20 +107,59 @@ def init_db():
                 order_status VARCHAR(20) DEFAULT 'pending',
                 payment_status VARCHAR(20) DEFAULT 'unpaid',
                 items_detail JSON NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
             """
             db.cursor.execute(create_orders_sql)
+            
+            # 检查 orders 表是否已有 user_id 列，没有则添加 (用于平滑升级)
+            db.cursor.execute("SHOW COLUMNS FROM orders LIKE 'user_id'")
+            if not db.cursor.fetchone():
+                db.cursor.execute("ALTER TABLE orders ADD COLUMN user_id INT AFTER order_no")
+                db.cursor.execute("ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL")
+                logger.info("平滑升级：已为 orders 表增加 user_id 列")
+
             db.commit()
-            logger.info("订单表初始化/检查成功")
+            logger.info("数据库表结构初始化/检查成功")
     except Exception as e:
         logger.error(f"初始化数据库表失败: {e}")
+
+
+def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
+    """根据用户名查询用户"""
+    try:
+        with DataBaseConnection() as db:
+            sql = "SELECT * FROM users WHERE username = %s"
+            db.cursor.execute(sql, (username,))
+            return db.cursor.fetchone()
+    except Exception as e:
+        logger.error(f"查询用户失败: {e}")
+        return None
+
+
+def create_user(user_data: Dict[str, Any]) -> bool:
+    """创建新用户"""
+    try:
+        with DataBaseConnection() as db:
+            sql = "INSERT INTO users (username, password_hash, nickname, phone) VALUES (%s, %s, %s, %s)"
+            db.cursor.execute(sql, (
+                user_data['username'],
+                user_data['password_hash'],
+                user_data.get('nickname', user_data['username']),
+                user_data.get('phone')
+            ))
+            db.commit()
+            return True
+    except Exception as e:
+        logger.error(f"创建用户失败: {e}")
+        return False
 
 
 def create_order(order_data: Dict[str, Any]) -> Optional[str]:
     """创建新订单"""
     try:
-        # 生成订单号 (简单起见使用时间戳+随机数)
+        # 生成订单号
         import time
         import random
         order_no = f"ORD{int(time.time())}{random.randint(1000, 9999)}"
@@ -113,11 +167,12 @@ def create_order(order_data: Dict[str, Any]) -> Optional[str]:
         with DataBaseConnection() as db:
             insert_sql = """
             INSERT INTO orders 
-            (order_no, total_amount, delivery_fee, actual_amount, delivery_address, items_detail)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            (order_no, user_id, total_amount, delivery_fee, actual_amount, delivery_address, items_detail)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """
             db.cursor.execute(insert_sql, (
                 order_no,
+                order_data.get('user_id'),
                 order_data['total_amount'],
                 order_data['delivery_fee'],
                 order_data['actual_amount'],
@@ -164,12 +219,17 @@ def get_order(order_no: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def get_all_orders(limit: int = 10) -> List[Dict[str, Any]]:
-    """查询所有订单列表（按时间倒序）"""
+def get_all_orders(user_id: Optional[int] = None, limit: int = 10) -> List[Dict[str, Any]]:
+    """查询订单列表（可选按用户过滤）"""
     try:
         with DataBaseConnection() as db:
-            query_sql = "SELECT * FROM orders ORDER BY created_at DESC LIMIT %s"
-            db.cursor.execute(query_sql, (limit,))
+            if user_id:
+                query_sql = "SELECT * FROM orders WHERE user_id = %s ORDER BY created_at DESC LIMIT %s"
+                db.cursor.execute(query_sql, (user_id, limit))
+            else:
+                query_sql = "SELECT * FROM orders ORDER BY created_at DESC LIMIT %s"
+                db.cursor.execute(query_sql, (limit,))
+            
             orders = db.cursor.fetchall()
             for order in orders:
                 if 'items_detail' in order:

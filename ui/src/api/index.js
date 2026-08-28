@@ -12,6 +12,10 @@ const api = axios.create({
 // 请求拦截器
 api.interceptors.request.use(
   config => {
+    const token = localStorage.getItem('token')
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`
+    }
     console.log('API请求:', config.method.toUpperCase(), config.url, config.data)
     return config
   },
@@ -29,16 +33,58 @@ api.interceptors.response.use(
   },
   error => {
     console.error('响应错误:', error.response?.status, error.response?.data)
+    if (error.response?.status === 401) {
+      // Token 过期或未登录
+      localStorage.removeItem('token')
+      localStorage.removeItem('user')
+      // 触发全局事件或在页面中处理重定向
+      window.dispatchEvent(new Event('unauthorized'))
+    }
+    
     if (error.response?.status === 500) {
       throw new Error('处理中遇到问题，请稍后再试')
     } else if (error.response?.status === 404) {
       throw new Error('请求的资源不存在')
     } else {
-      // 移除超时和服务器不可用的通用提醒
       throw new Error(error.response?.data?.detail || '请求处理中，请稍候...')
     }
   }
 )
+
+// 认证API
+export const authAPI = {
+  register: async (userData) => {
+    return await api.post('/auth/register', userData)
+  },
+  login: async (username, password) => {
+    // 使用 URLSearchParams 发送表单数据
+    const params = new URLSearchParams()
+    params.append('username', username)
+    params.append('password', password)
+    
+    const response = await api.post('/auth/login', params, {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      }
+    })
+    
+    if (response.access_token) {
+      localStorage.setItem('token', response.access_token)
+      localStorage.setItem('user', JSON.stringify({
+        username: response.username,
+        nickname: response.nickname
+      }))
+    }
+    return response
+  },
+  getMe: async () => {
+    return await api.get('/auth/me')
+  },
+  logout: () => {
+    localStorage.removeItem('token')
+    localStorage.removeItem('user')
+  }
+}
 
 // 智能对话API
 export const chatAPI = {
@@ -48,11 +94,17 @@ export const chatAPI = {
   },
   // 流式发送消息
   sendMessageStream: async (query, session_id = 'default', onChunk) => {
+    const token = localStorage.getItem('token')
+    const headers = {
+      'Content-Type': 'application/json',
+    }
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`
+    }
+
     const response = await fetch('/api/chat/stream', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: headers,
       body: JSON.stringify({ query, session_id }),
     });
 

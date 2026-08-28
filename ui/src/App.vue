@@ -1,5 +1,25 @@
 <template>
   <div class="app-wrapper">
+    <!-- 用户登录状态条 (顶置) -->
+    <div class="user-status-bar">
+      <div v-if="currentUser" class="user-logged-in">
+        <el-dropdown trigger="click" @command="handleUserCommand">
+          <div class="user-profile">
+            <el-avatar :size="24" icon="UserFilled" />
+            <span class="nickname">{{ currentUser.nickname }}</span>
+          </div>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="logout">退出登录</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+      </div>
+      <div v-else class="user-guest">
+        <el-button type="primary" link size="small" @click="showLogin = true">登录 / 注册</el-button>
+      </div>
+    </div>
+
     <el-container class="main-container">
       <!-- 侧边栏：菜品展示 -->
       <el-aside width="400px" class="menu-sidebar">
@@ -291,25 +311,121 @@
         <el-empty v-else description="暂无订单记录" />
       </div>
     </el-drawer>
+
+    <!-- 登录/注册对话框 -->
+    <el-dialog
+      v-model="showLogin"
+      :title="isLoginMode ? '欢迎回来' : '开启美食之旅'"
+      width="380px"
+      append-to-body
+      class="auth-dialog"
+    >
+      <div class="auth-form-container">
+        <el-form :model="authForm" label-position="top">
+          <el-form-item label="用户名">
+            <el-input v-model="authForm.username" placeholder="请输入用户名" />
+          </el-form-item>
+          <el-form-item label="密码">
+            <el-input v-model="authForm.password" type="password" placeholder="请输入密码" show-password />
+          </el-form-item>
+          <template v-if="!isLoginMode">
+            <el-form-item label="昵称">
+              <el-input v-model="authForm.nickname" placeholder="给小二留个称呼吧" />
+            </el-form-item>
+            <el-form-item label="手机号">
+              <el-input v-model="authForm.phone" placeholder="用于配送联系" />
+            </el-form-item>
+          </template>
+        </el-form>
+        <div class="auth-actions">
+          <el-button type="primary" @click="handleAuth" :loading="authLoading" class="submit-btn">
+            {{ isLoginMode ? '立即登录' : '立即注册' }}
+          </el-button>
+          <div class="switch-mode">
+            <span>{{ isLoginMode ? '还没有账号？' : '已有账号？' }}</span>
+            <el-button link type="primary" @click="isLoginMode = !isLoginMode">
+              {{ isLoginMode ? '去注册' : '去登录' }}
+            </el-button>
+          </div>
+        </div>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script>
 import { ref, onMounted, computed, nextTick, watch, reactive } from 'vue'
-import { chatAPI, deliveryAPI, menuAPI, restaurantAPI, orderAPI } from './api/index.js'
+import { chatAPI, deliveryAPI, menuAPI, restaurantAPI, orderAPI, authAPI } from './api/index.js'
 import { ElMessage, ElMessageBox, ElLoading } from 'element-plus'
 import { 
   Food, Location, ShoppingCart, Refresh, ChatDotRound, 
-  Service, User, Close, List, Warning, CircleCheck, Delete
+  Service, User, Close, List, Warning, CircleCheck, Delete, UserFilled
 } from '@element-plus/icons-vue'
 
 export default {
   name: 'App',
   components: {
     Food, Location, ShoppingCart, Refresh, ChatDotRound,
-    Service, User, Close, List, Warning, CircleCheck, Delete
+    Service, User, Close, List, Warning, CircleCheck, Delete, UserFilled
   },
   setup() {
+    // 用户认证相关
+    const currentUser = ref(JSON.parse(localStorage.getItem('user') || 'null'))
+    const showLogin = ref(false)
+    const isLoginMode = ref(true)
+    const authLoading = ref(false)
+    const authForm = reactive({
+      username: '',
+      password: '',
+      nickname: '',
+      phone: ''
+    })
+
+    const handleAuth = async () => {
+      if (!authForm.username || !authForm.password) {
+        ElMessage.warning('请填写完整信息')
+        return
+      }
+      authLoading.value = true
+      try {
+        if (isLoginMode.value) {
+          const res = await authAPI.login(authForm.username, authForm.password)
+          currentUser.value = { username: res.username, nickname: res.nickname }
+          ElMessage.success(`欢迎回来，${res.nickname}！`)
+          showLogin.value = false
+          // 登录后自动发送个性化招呼语
+          await sendInitialGreeting()
+        } else {
+          const res = await authAPI.register(authForm)
+          if (res.success) {
+            ElMessage.success(res.message)
+            isLoginMode.value = true
+          } else {
+            ElMessage.error(res.message)
+          }
+        }
+      } catch (e) {
+        ElMessage.error(e.message || '操作失败')
+      } finally {
+        authLoading.value = false
+      }
+    }
+
+    const handleUserCommand = (command) => {
+      if (command === 'logout') {
+        authAPI.logout()
+        currentUser.value = null
+        ElMessage.info('已退出登录')
+        ordersList.value = []
+      }
+    }
+
+    const sendInitialGreeting = async () => {
+      const greeting = `小二，我来啦！`
+      chatHistory.value.push({ role: 'user', content: greeting })
+      await sendMessage(greeting)
+    }
+
     const sessionId = ref('session-' + Math.random().toString(36).substring(2, 9))
     const chatQuery = ref('')
     const chatHistory = ref([])
@@ -453,6 +569,11 @@ export default {
     }
 
     const loadOrders = async () => {
+      if (!currentUser.value) {
+        ElMessage.warning('请先登录以查看订单历史')
+        showLogin.value = true
+        return
+      }
       ordersLoading.value = true
       try {
         const res = await orderAPI.getOrderList()
@@ -704,9 +825,18 @@ export default {
     onMounted(() => {
       loadMenuItems()
       loadRestaurantInfo()
+      
+      // 监听未授权事件
+      window.addEventListener('unauthorized', () => {
+        currentUser.value = null
+        showLogin.value = true
+        ElMessage.warning('请先登录')
+      })
     })
 
     return {
+      currentUser, showLogin, isLoginMode, authLoading, authForm,
+      handleAuth, handleUserCommand,
       chatQuery, chatHistory, chatLoading, chatWindow,
       deliveryAddress, travelMode, deliveryResponse, deliveryLoading, showDeliveryInput,
       menuItems, menuLoading, highlightedItems, activeCategory, filteredMenu,
@@ -739,10 +869,69 @@ body {
 .app-wrapper {
   height: 100vh;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 用户状态栏样式 */
+.user-status-bar {
+  background: white;
+  padding: 4px 20px;
+  display: flex;
+  justify-content: flex-end;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+  z-index: 100;
+}
+
+.user-profile {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 12px;
+  transition: background 0.2s;
+}
+
+.user-profile:hover {
+  background: var(--bg-light);
+}
+
+.user-profile .nickname {
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+/* 登录弹窗样式 */
+.auth-form-container {
+  padding: 0 10px;
+}
+
+.auth-actions {
+  margin-top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.submit-btn {
+  width: 100%;
+  height: 40px;
+  font-size: 16px;
+}
+
+.switch-mode {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-size: 14px;
+  color: var(--text-sec);
 }
 
 .main-container {
-  height: 100%;
+  flex: 1;
+  overflow: hidden;
 }
 
 /* Sidebar Styling */

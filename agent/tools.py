@@ -47,28 +47,46 @@ def check_delivery(address: str, travel_mode: str = "2") -> Dict[str, Any]:
         return {"success": False, "message": str(e)}
 
 @tool
-def query_order(order_no: Optional[str] = None) -> str:
+def query_order(order_no: Optional[str] = None, user_id: Optional[int] = None) -> str:
     """
     查询订单状态和详情。
     参数 order_no 是可选的订单号。
-    如果不提供订单号，工具会自动尝试查找最近的一笔订单。
+    如果不提供订单号，工具会自动尝试查找该客官最近的一笔订单。
+    user_id 由系统自动提供，用于确保只能查到客官自己的订单。
     """
     try:
         target_order_no = order_no
-        if not target_order_no:
-            logger.info("AI Tool Calling: query_order (no order_no, fetching latest)")
-            with DataBaseConnection() as db:
-                db.cursor.execute("SELECT order_no FROM orders ORDER BY created_at DESC LIMIT 1")
+        
+        with DataBaseConnection() as db:
+            if not target_order_no:
+                logger.info(f"AI Tool Calling: query_order (no order_no, user_id={user_id})")
+                if user_id:
+                    db.cursor.execute("SELECT order_no FROM orders WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
+                else:
+                    db.cursor.execute("SELECT order_no FROM orders ORDER BY created_at DESC LIMIT 1")
+                
                 row = db.cursor.fetchone()
                 if row:
                     target_order_no = row['order_no']
                 else:
                     return "客官，小店还没查到您的下单记录呢，要不您先点几个菜试试？"
 
-        logger.info(f"AI Tool Calling: query_order for '{target_order_no}'")
-        order = get_order(target_order_no)
+            logger.info(f"AI Tool Calling: query_order for '{target_order_no}' (user_id={user_id})")
+            # 增加 user_id 校验，防止越权查询
+            if user_id:
+                query_sql = "SELECT * FROM orders WHERE order_no = %s AND user_id = %s"
+                db.cursor.execute(query_sql, (target_order_no, user_id))
+            else:
+                query_sql = "SELECT * FROM orders WHERE order_no = %s"
+                db.cursor.execute(query_sql, (target_order_no,))
+            
+            order = db.cursor.fetchone()
         
         if order:
+            if 'items_detail' in order and isinstance(order['items_detail'], str):
+                import json
+                order['items_detail'] = json.loads(order['items_detail'])
+            
             status_map = {
                 "pending": "待处理（小二正在飞奔确认中）",
                 "paid": "已支付（后厨大师傅火候正旺，请稍候）",
@@ -77,7 +95,6 @@ def query_order(order_no: Optional[str] = None) -> str:
             }
             status_text = status_map.get(order['order_status'], order['order_status'])
             
-            # 构建一个纯文本的、包含关键信息的回复
             items_str = ", ".join([f"{i['dish_name']}x{i['quantity']}" for i in order['items_detail']])
             res_text = (
                 f"查到了！单号：{target_order_no}\n"

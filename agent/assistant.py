@@ -7,14 +7,14 @@ from agent.langgraph_agent import restaurant_agent
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-async def chat_with_assistant_stream(user_query: str, session_id: str = "default"):
+async def chat_with_assistant_stream(user_query: str, session_id: str = "default", user_info: dict = None):
     """
     流式对话接口
     """
     try:
         logger.info(f"开始流式对话: query='{user_query}', session='{session_id}'")
         count = 0
-        async for chunk in restaurant_agent.astream_run(user_query, thread_id=session_id):
+        async for chunk in restaurant_agent.astream_run(user_query, session_id=session_id, user_info=user_info):
             if chunk.get("type") == "content":
                 count += 1
             yield chunk
@@ -23,13 +23,14 @@ async def chat_with_assistant_stream(user_query: str, session_id: str = "default
         logger.error(f"流式 Agent 执行异常: {e}")
         yield {"type": "error", "content": str(e)}
 
-async def chat_with_assistant(user_query: str, session_id: str = "default"):
+async def chat_with_assistant(user_query: str, session_id: str = "default", user_info: dict = None):
     """
     和智能小助手对话 (已升级为 LangGraph 架构)
     
     Args:
         user_query: 用户输入的问题
         session_id: 会话ID，用于实现多轮对话记忆
+        user_info: 当前用户信息
         
     Returns:
         Union[str, dict]: 助手回复内容或包含推荐信息的字典
@@ -38,8 +39,7 @@ async def chat_with_assistant(user_query: str, session_id: str = "default"):
         logger.info(f"开始对话: query='{user_query}', session='{session_id}'")
         
         # 调用升级后的 LangGraph Agent
-        # 它内部会自动处理意图分析、工具执行以及对话历史（Memory）
-        result = await restaurant_agent.run(user_query, thread_id=session_id)
+        result = await restaurant_agent.run(user_query, session_id=session_id, user_info=user_info)
         
         # 保持与旧版 API 的兼容性
         # 如果 Agent 返回了具体的菜品推荐 ID，则组装成旧版的字典格式
