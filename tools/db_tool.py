@@ -10,9 +10,10 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 import mysql.connector
-
+import json
+from datetime import datetime
 from dotenv import load_dotenv
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from tools.redis_tool import cache
 
 load_dotenv()
@@ -23,23 +24,17 @@ class DataBaseConnection:
 
     def __init__(self):
         """初始化数据库配置信息"""
-
-        # 1.定义了数据库的配置信息
         self.host = os.getenv("MYSQL_HOST", "localhost")
         self.port = os.getenv("MYSQL_PORT", "3306")
         self.user = os.getenv("MYSQL_USER_NAME", "root")
         self.password = os.getenv("MYSQL_USER_PASSWORD", "root")
         self.db_name = os.getenv("MYSQL_DB_NAME", "menu")
-
-        # 2.数据库操作的两个对象
-        self.connection = None  # 连接对象
-        self.cursor = None  # 真正执行SQL的对象
+        self.connection = None
+        self.cursor = None
 
     def initialize_connection(self) -> bool:
         """初始化数据库连接对象和游标对象"""
-
         try:
-            # 1.初始化连接对象
             self.connection = mysql.connector.connect(
                 host=self.host,
                 port=self.port,
@@ -47,65 +42,126 @@ class DataBaseConnection:
                 password=self.password,
                 database=self.db_name,
                 charset="utf8mb4")
-
-            # 2.初始化游标对象
-            self.cursor = self.connection.cursor(
-                dictionary=True)  # 游标的作用：执行SQL语句 获取SQL语句对应的结果。  select name from temp===(name,"zs")  {"name":"zs"}
-
-            logger.info(f"数据库{self.db_name}连接初始化成功")
+            self.cursor = self.connection.cursor(dictionary=True)
             return True
-
         except mysql.connector.Error as e:
-            logger.error(f"数据库{self.db_name}连接初始化失败: {e}")
+            logger.error(f"数据库{self.db_name}连接失败: {e}")
             return False
 
     def disconnect_connection(self) -> bool:
-        """关闭数据库游标和连接资源"""
+        """关闭数据库资源"""
         try:
-            # 1.关闭游标对象
             if self.cursor:
-                self.cursor.close()  # 游标对象关闭
-                self.cursor = None  # 内部置空
-
-            # 2.关闭连接
+                self.cursor.close()
             if self.connection and self.connection.is_connected():
-                self.connection.close()  # 断开外部链接
-                self.connection = None  # 内部置空
-            logger.info("关闭数据库连接成功")
+                self.connection.close()
             return True
         except mysql.connector.Error as e:
             logger.error(f"关闭数据库资源失败: {e}")
             return False
 
-    def __enter__(self):
-        """
-        上下文管理器对象入口
-        调用时机：实例化后，在with代码块执行前
-        返回值：一定是一个上下文管理器对象（自己：self）
-        """
+    def commit(self):
+        """提交事务"""
+        if self.connection:
+            self.connection.commit()
 
+    def __enter__(self):
         if self.initialize_connection():
-            logger.info("数据库初始化成功")
             return self
         else:
-            raise Exception
+            raise Exception("数据库初始化失败")
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """
-        上下文管理器对象出口
-        调用时机：在with代码块执行之后
-        exc_type：异常类型
-        exc_val: 异常类型对应的具体说明
-        exc_tb:  记录哪个模块 哪一行代码出现（栈的跟踪）
-
-        """
-
         self.disconnect_connection()
+        return False
 
-        if exc_type:
-            logger.error(f"执行with代码块期间出现了异常：{exc_val}")
 
-        return False  # 默认返回的是False.  False:我只是告你有异常，我不会处理，会继续向上抛出。 True:不仅会告诉你有异常，而且直接处理了。不会向上抛。
+def init_db():
+    """初始化数据库表结构"""
+    try:
+        with DataBaseConnection() as db:
+            # 创建订单表
+            create_orders_sql = """
+            CREATE TABLE IF NOT EXISTS orders (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                order_no VARCHAR(50) NOT NULL UNIQUE,
+                total_amount DECIMAL(10, 2) NOT NULL,
+                delivery_fee DECIMAL(10, 2) NOT NULL,
+                actual_amount DECIMAL(10, 2) NOT NULL,
+                delivery_address TEXT NOT NULL,
+                order_status VARCHAR(20) DEFAULT 'pending',
+                payment_status VARCHAR(20) DEFAULT 'unpaid',
+                items_detail JSON NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """
+            db.cursor.execute(create_orders_sql)
+            db.commit()
+            logger.info("订单表初始化/检查成功")
+    except Exception as e:
+        logger.error(f"初始化数据库表失败: {e}")
+
+
+def create_order(order_data: Dict[str, Any]) -> Optional[str]:
+    """创建新订单"""
+    try:
+        # 生成订单号 (简单起见使用时间戳+随机数)
+        import time
+        import random
+        order_no = f"ORD{int(time.time())}{random.randint(1000, 9999)}"
+
+        with DataBaseConnection() as db:
+            insert_sql = """
+            INSERT INTO orders 
+            (order_no, total_amount, delivery_fee, actual_amount, delivery_address, items_detail)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """
+            db.cursor.execute(insert_sql, (
+                order_no,
+                order_data['total_amount'],
+                order_data['delivery_fee'],
+                order_data['actual_amount'],
+                order_data['delivery_address'],
+                json.dumps(order_data['items_detail'], ensure_ascii=False)
+            ))
+            db.commit()
+            logger.info(f"订单 {order_no} 创建成功")
+            return order_no
+    except Exception as e:
+        logger.error(f"创建订单失败: {e}")
+        return None
+
+
+def update_order_status(order_no: str, status: str, payment_status: Optional[str] = None) -> bool:
+    """更新订单状态"""
+    try:
+        with DataBaseConnection() as db:
+            if payment_status:
+                update_sql = "UPDATE orders SET order_status = %s, payment_status = %s WHERE order_no = %s"
+                db.cursor.execute(update_sql, (status, payment_status, order_no))
+            else:
+                update_sql = "UPDATE orders SET order_status = %s WHERE order_no = %s"
+                db.cursor.execute(update_sql, (status, order_no))
+            db.commit()
+            return True
+    except Exception as e:
+        logger.error(f"更新订单状态失败: {e}")
+        return False
+
+
+def get_order(order_no: str) -> Optional[Dict[str, Any]]:
+    """查询订单详情"""
+    try:
+        with DataBaseConnection() as db:
+            query_sql = "SELECT * FROM orders WHERE order_no = %s"
+            db.cursor.execute(query_sql, (order_no,))
+            order = db.cursor.fetchone()
+            if order and 'items_detail' in order:
+                order['items_detail'] = json.loads(order['items_detail'])
+            return order
+    except Exception as e:
+        logger.error(f"查询订单失败: {e}")
+        return None
 
 
 def get_all_menu_items() -> str:

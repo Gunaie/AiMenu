@@ -251,8 +251,8 @@
 
 <script>
 import { ref, onMounted, computed, nextTick, watch, reactive } from 'vue'
-import { chatAPI, deliveryAPI, menuAPI, restaurantAPI } from './api/index.js'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { chatAPI, deliveryAPI, menuAPI, restaurantAPI, orderAPI } from './api/index.js'
+import { ElMessage, ElMessageBox, ElLoading } from 'element-plus'
 
 export default {
   name: 'App',
@@ -309,7 +309,7 @@ export default {
       cart.value = cart.value.filter(i => i.id !== id)
     }
 
-    const checkout = () => {
+    const checkout = async () => {
       // 下单拦截机制：强制配送范围校验
       if (!deliveryResponse.value) {
         ElMessage.warning('请先设置并校验配送地址')
@@ -324,15 +324,67 @@ export default {
 
       const totalWithDelivery = (parseFloat(totalPrice.value) + (deliveryResponse.value.delivery_fee || 0)).toFixed(2)
 
-      ElMessageBox.confirm(
-        `确认下单吗？\n菜品：¥${totalPrice.value}\n配送费：¥${deliveryResponse.value.delivery_fee}\n总计金额：¥${totalWithDelivery}`,
-        '订单确认',
-        { confirmButtonText: '确认', cancelButtonText: '取消', type: 'success' }
-      ).then(() => {
-        ElMessage.success('下单成功！')
-        cart.value = []
-        showCart.value = false
-      })
+      try {
+        await ElMessageBox.confirm(
+          `确认下单吗？\n菜品：¥${totalPrice.value}\n配送费：¥${deliveryResponse.value.delivery_fee}\n总计金额：¥${totalWithDelivery}`,
+          '订单确认',
+          { confirmButtonText: '立即下单', cancelButtonText: '取消', type: 'success' }
+        )
+
+        const loading = ElLoading.service({ text: '正在提交订单...' })
+        
+        const orderData = {
+          total_amount: parseFloat(totalPrice.value),
+          delivery_fee: deliveryResponse.value.delivery_fee,
+          actual_amount: parseFloat(totalWithDelivery),
+          delivery_address: deliveryResponse.value.formatted_address,
+          items_detail: cart.value.map(item => ({
+            id: item.id,
+            dish_name: item.dish_name,
+            price: item.price,
+            quantity: item.quantity
+          }))
+        }
+
+        const res = await orderAPI.submitOrder(orderData)
+        loading.close()
+
+        if (res.success) {
+          const orderNo = res.order_no
+          await ElMessageBox.confirm(
+            `订单已生成！单号：${orderNo}\n是否立即模拟支付？`,
+            '待支付',
+            { confirmButtonText: '模拟支付', cancelButtonText: '稍后支付', type: 'info' }
+          )
+          
+          await handlePayment(orderNo)
+        } else {
+          ElMessage.error(res.message || '订单提交失败')
+        }
+      } catch (error) {
+        if (error !== 'cancel') {
+          console.error('下单流程失败:', error)
+          ElMessage.error('系统繁忙，请稍后再试')
+        }
+      }
+    }
+
+    const handlePayment = async (orderNo) => {
+      const loading = ElLoading.service({ text: '正在模拟支付...' })
+      try {
+        const res = await orderAPI.payOrder(orderNo)
+        loading.close()
+        if (res.success) {
+          ElMessage.success('支付成功！餐厅正在为您准备菜品')
+          cart.value = []
+          showCart.value = false
+        } else {
+          ElMessage.error(res.message || '支付失败')
+        }
+      } catch (error) {
+        loading.close()
+        ElMessage.error('支付处理异常')
+      }
     }
 
     const getDishNameById = (id) => {

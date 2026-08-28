@@ -119,6 +119,18 @@ export const restaurantAPI = {
   }
 }
 
+// 订单API
+export const orderAPI = {
+  // 提交订单
+  submitOrder: async (orderData) => {
+    return await api.post('/order/submit', orderData)
+  },
+  // 模拟支付
+  payOrder: async (orderNo) => {
+    return await api.post(`/order/pay/${orderNo}`)
+  }
+}
+
 // 健康检查API
 export const healthAPI = {
   // 检查服务状态

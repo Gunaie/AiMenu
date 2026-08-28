@@ -15,6 +15,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 app=FastAPI(title="智能点餐助手的API接口",description="智能点餐应用主要暴露三个接口分别为智能对话接口、配送查询接口、菜品列表接口")
 
+@app.on_event("startup")
+async def startup_event():
+    from tools.db_tool import init_db
+    init_db()
+
 
 
 @app.get("/")
@@ -86,6 +91,27 @@ class RestaurantInfoResponse(BaseModel):
     longitude: float
     latitude: float
     delivery_radius: float
+
+# 定义订单项模型
+class OrderItem(BaseModel):
+    id: int
+    dish_name: str
+    price: float
+    quantity: int
+
+# 定义提交订单请求模型
+class OrderSubmitRequest(BaseModel):
+    total_amount: float
+    delivery_fee: float
+    actual_amount: float
+    delivery_address: str
+    items_detail: List[OrderItem]
+
+# 定义通用操作响应模型
+class ActionResponse(BaseModel):
+    success: bool
+    message: str
+    order_no: Optional[str] = None
 
 @app.get("/delivery/tips")
 async def delivery_tips_endpoint(keywords: str):
@@ -234,6 +260,22 @@ async def delivery_endpoint(request: DeliveryRequest):
             success=False,
             message=f"配送范围查询失败{e}"
         )
+
+
+@app.post("/order/submit", response_model=ActionResponse)
+async def order_submit_endpoint(request: OrderSubmitRequest):
+    """提交订单接口"""
+    from service.diancan_service import submit_order
+    result = submit_order(request.dict())
+    return ActionResponse(**result)
+
+
+@app.post("/order/pay/{order_no}", response_model=ActionResponse)
+async def order_pay_endpoint(order_no: str):
+    """模拟支付接口"""
+    from service.diancan_service import pay_order
+    result = pay_order(order_no)
+    return ActionResponse(**result)
 
 
 

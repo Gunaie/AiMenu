@@ -29,4 +29,30 @@ def  smart_chat(user_query:str, session_id: str = "default"):
     return chat_with_assistant(user_query, session_id)
 
 
+def submit_order(order_data: dict):
+    """提交订单"""
+    from tools.db_tool import create_order
+    order_no = create_order(order_data)
+    if order_no:
+        return {"success": True, "order_no": order_no, "message": "订单提交成功"}
+    return {"success": False, "message": "订单提交失败"}
+
+
+def pay_order(order_no: str):
+    """模拟支付"""
+    from tools.db_tool import update_order_status, get_order
+    order = get_order(order_no)
+    if not order:
+        return {"success": False, "message": "订单不存在"}
+    
+    if order['payment_status'] == 'paid':
+        return {"success": True, "message": "订单已支付，请勿重复支付"}
+    
+    # 模拟支付成功
+    success = update_order_status(order_no, status='paid', payment_status='paid')
+    if success:
+        return {"success": True, "message": "支付成功", "order_no": order_no}
+    return {"success": False, "message": "支付处理失败"}
+
+
 
