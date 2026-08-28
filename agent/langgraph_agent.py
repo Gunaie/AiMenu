@@ -92,13 +92,14 @@ class SmartRestaurantGraph:
 
 准则：
 1. **角色定位**：自称“小二”，称呼用户为“客官”。语气亲切，适当使用“好嘞”、“客官您慢看”等表达。
-2. **工具使用优先级**：
-   - 寻找菜品/推荐/口味 -> 使用 search_menu。
-   - 查订单状态/我的单子/刚下的单 -> **必须使用 query_order**。即使用户没给单号也用它，工具会自动查最近的单子。
-   - 查配送范围/能否送达 -> 使用 check_delivery（前提是用户给了具体的地点）。
-3. **关键区分**：
-   - **绝对禁止**：严禁在用户询问“订单”、“单子”、“进度”时调用 check_delivery。
-   - **绝对禁止**：如果用户没提供具体地名（如“这里”、“我这”），严禁调用 check_delivery。
+2. **工具使用优先级（极其重要）**：
+   - **查订单状态/进度/我的单子**：必须调用 `query_order`。即使客官只说了“我的订单怎么样了”，也要直接调用它，工具会自动识别最近的订单。**严禁此时调用配送校验工具**。
+   - **查配送范围/能否送达**：仅当客官询问“能否送到某地”或“配送费多少”且明确提到了一个【地点】时，才调用 `check_delivery`。如果没提地点，请礼貌询问地点。
+   - **寻找菜品/推荐/口味**：使用 `search_menu`。
+3. **意图区分示例**：
+   - 用户：“我刚才的订单怎么样了” -> **调用 `query_order()`**。
+   - 用户：“光谷地铁站能送到吗” -> **调用 `check_delivery(address='光谷地铁站')`**。
+   - 用户：“这里能送到吗” -> 回复：“客官，请告诉小二一个具体的地点，小二马上帮您核实”。
 4. **多轮对话**：承接上文，不重复啰嗦。
 5. **菜品高亮**：当你向客官推荐或提到具体菜品时，请务必直接说出【参考数据】中的完整菜名。
 6. **逻辑闭环**：如果获取到的数据为空或失败，如实告知客官并提供备选建议。
@@ -170,16 +171,19 @@ class SmartRestaurantGraph:
                 # 2. 处理元数据 (菜品 ID)
                 elif kind == "on_chain_end":
                     if event["name"] == "LangGraph":
-                        final_state = event["data"]["output"]
-                        if isinstance(final_state, dict) and "menu_ids" in final_state:
-                            menu_ids = final_state["menu_ids"]
-                            if menu_ids:
-                                logger.info(f"LangGraph astream_run - Yielding menu_ids: {menu_ids}")
-                                yield {"type": "metadata", "menu_ids": menu_ids}
+                        try:
+                            final_state = event["data"].get("output")
+                            if isinstance(final_state, dict) and "menu_ids" in final_state:
+                                menu_ids = final_state["menu_ids"]
+                                if menu_ids:
+                                    logger.info(f"LangGraph astream_run - Yielding menu_ids: {menu_ids}")
+                                    yield {"type": "metadata", "menu_ids": menu_ids}
+                        except Exception as meta_e:
+                            logger.error(f"Error extracting metadata: {meta_e}")
                                 
         except Exception as e:
             logger.error(f"LangGraph astream_run error: {e}")
-            yield {"type": "error", "content": "小二忙不过来了，请客官稍后再试。"}
+            yield {"type": "error", "content": f"小二忙不过来了，请客官稍后再试。(错误详情: {str(e)})"}
 
     async def run(self, user_query: str, thread_id: str = "default"):
         """同步运行流程"""

@@ -30,9 +30,9 @@ def search_menu(query: str) -> Dict[str, Any]:
 def check_delivery(address: str, travel_mode: str = "2") -> Dict[str, Any]:
     """
     检查指定地址是否在餐厅的配送范围内。
+    该工具仅用于地理位置查询，如“配送费多少”、“能否送到某地”。
     参数 address 是详细的地点名称（如：光谷广场）。
-    参数 travel_mode 是配送模式：1=步行, 2=骑行(默认), 3=驾车。
-    注意：必须提供具体的地点名称，严禁传入空字符串或无意义的代词。
+    注意：严禁在查询“订单状态”时调用此工具。
     """
     try:
         if not address or len(address.strip()) < 2:
@@ -47,48 +47,51 @@ def check_delivery(address: str, travel_mode: str = "2") -> Dict[str, Any]:
         return {"success": False, "message": str(e)}
 
 @tool
-def query_order(order_no: str = None) -> Dict[str, Any]:
+def query_order(order_no: Optional[str] = None) -> str:
     """
     查询订单状态和详情。
-    参数 order_no 是订单号（如：ORD172483...）。
-    如果不提供订单号，工具会自动尝试查找客官最近的一笔订单。
-    当用户询问“我的订单”、“订单状态”或“查一下我的单子”时，请使用此工具。
+    参数 order_no 是可选的订单号。
+    如果不提供订单号，工具会自动尝试查找最近的一笔订单。
     """
     try:
-        # 如果没有提供订单号，尝试从数据库获取最近一笔订单
-        if not order_no:
+        target_order_no = order_no
+        if not target_order_no:
             logger.info("AI Tool Calling: query_order (no order_no, fetching latest)")
             with DataBaseConnection() as db:
                 db.cursor.execute("SELECT order_no FROM orders ORDER BY created_at DESC LIMIT 1")
                 row = db.cursor.fetchone()
                 if row:
-                    order_no = row['order_no']
-                    logger.info(f"Auto-detected latest order_no: {order_no}")
+                    target_order_no = row['order_no']
                 else:
-                    return {"success": False, "message": "客官，小店还没查到您的下单记录呢，要不您先点几个菜试试？"}
+                    return "客官，小店还没查到您的下单记录呢，要不您先点几个菜试试？"
 
-        logger.info(f"AI Tool Calling: query_order for '{order_no}'")
-        order = get_order(order_no)
+        logger.info(f"AI Tool Calling: query_order for '{target_order_no}'")
+        order = get_order(target_order_no)
+        
         if order:
-            # 状态映射
             status_map = {
                 "pending": "待处理（小二正在飞奔确认中）",
                 "paid": "已支付（后厨大师傅火候正旺，请稍候）",
                 "completed": "已完成（祝客官用餐愉快）",
                 "cancelled": "已取消"
             }
-            return {
-                "success": True,
-                "order_no": order['order_no'],
-                "status": status_map.get(order['order_status'], order['order_status']),
-                "total_amount": float(order['total_amount']),
-                "items": order['items_detail'],
-                "address": order['delivery_address']
-            }
-        return {"success": False, "message": f"客官，小店翻遍了账本也没找到单号为 {order_no} 的记录，请您核对一下单号是否正确。"}
+            status_text = status_map.get(order['order_status'], order['order_status'])
+            
+            # 构建一个纯文本的、包含关键信息的回复
+            items_str = ", ".join([f"{i['dish_name']}x{i['quantity']}" for i in order['items_detail']])
+            res_text = (
+                f"查到了！单号：{target_order_no}\n"
+                f"当前状态：{status_text}\n"
+                f"订单内容：{items_str}\n"
+                f"总额：¥{float(order['actual_amount'])}\n"
+                f"配送地址：{order['delivery_address']}"
+            )
+            return res_text
+            
+        return f"客官，小店翻遍了账本也没找到单号为 {target_order_no} 的记录，请您核对一下单号是否正确。"
     except Exception as e:
         logger.error(f"query_order tool error: {e}")
-        return {"success": False, "message": str(e)}
+        return f"抱歉客官，查询订单时遇到了点技术小故障：{str(e)}"
 
 # 导出工具列表供 Agent 使用
 restaurant_tools = [search_menu, check_delivery, query_order]

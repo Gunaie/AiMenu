@@ -15,8 +15,9 @@
             </div>
           </div>
           <div class="header-actions">
-            <el-button type="primary" link @click="openOrders">
-              <el-icon size="20"><List /></el-icon>
+            <el-button type="primary" link @click="openOrders" class="order-history-btn">
+              <el-icon :size="20"><List /></el-icon>
+              <span class="btn-text">我的订单</span>
             </el-button>
             <el-badge :value="cartCount" :hidden="cartCount === 0" class="cart-badge">
               <el-button type="primary" link @click="showCart = true">
@@ -297,9 +298,17 @@
 import { ref, onMounted, computed, nextTick, watch, reactive } from 'vue'
 import { chatAPI, deliveryAPI, menuAPI, restaurantAPI, orderAPI } from './api/index.js'
 import { ElMessage, ElMessageBox, ElLoading } from 'element-plus'
+import { 
+  Food, Location, ShoppingCart, Refresh, ChatDotRound, 
+  Service, User, Close, List, Warning, CircleCheck, Delete
+} from '@element-plus/icons-vue'
 
 export default {
   name: 'App',
+  components: {
+    Food, Location, ShoppingCart, Refresh, ChatDotRound,
+    Service, User, Close, List, Warning, CircleCheck, Delete
+  },
   setup() {
     const sessionId = ref('session-' + Math.random().toString(36).substring(2, 9))
     const chatQuery = ref('')
@@ -755,7 +764,26 @@ body {
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+}
+
+.order-history-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--primary-color);
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+
+.order-history-btn:hover {
+  background: rgba(64, 158, 255, 0.1);
+}
+
+.order-history-btn .btn-text {
+  font-size: 14px;
 }
 
 .cart-badge {
