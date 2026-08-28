@@ -75,13 +75,16 @@ async def startup_event():
         if not chroma_db.collection:
             chroma_db.initialize_connection()
         
-        # 检查是否需要同步数据 (如果 ids 为空)
-        results = chroma_db.collection.get(limit=1)
-        if not results['ids']:
-            logger.info("向量数据库为空，开始初始化同步...")
-            chroma_db.upsert_menu_data(clear_existing=True)
+        if chroma_db.collection:
+            # 检查是否需要同步数据 (如果 ids 为空)
+            results = chroma_db.collection.get(limit=1)
+            if not results['ids']:
+                logger.info("向量数据库为空，开始初始化同步...")
+                chroma_db.upsert_menu_data(clear_existing=True)
+            else:
+                logger.info("向量数据库已就绪")
         else:
-            logger.info("向量数据库已就绪")
+            logger.error("向量数据库连接初始化失败，跳过同步")
     except Exception as e:
         logger.error(f"启动时同步向量数据库失败: {e}")
 
@@ -242,14 +245,14 @@ async def get_me(current_user: dict = Depends(get_current_user)):
 # ====================== 业务逻辑接口 ======================
 
 @app.get("/delivery/tips")
-async def delivery_tips_endpoint(keywords: str):
-    """获取地址输入建议"""
+async def delivery_tips_endpoint(keywords: str, current_user: dict = Depends(get_current_user)):
+    """获取地址输入建议 (需要登录)"""
     from tools.amap_tool import get_input_tips
     return get_input_tips(keywords)
 
 @app.get("/restaurant/info", response_model=RestaurantInfoResponse)
-async def restaurant_info_endpoint():
-    """获取餐厅基本信息"""
+async def restaurant_info_endpoint(current_user: dict = Depends(get_current_user)):
+    """获取餐厅基本信息 (需要登录)"""
     from tools.amap_tool import config
     return RestaurantInfoResponse(
         success=True,
@@ -261,9 +264,9 @@ async def restaurant_info_endpoint():
     )
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest, current_user: dict = Depends(get_optional_user)):
+async def chat_endpoint(request: ChatRequest, current_user: dict = Depends(get_current_user)):
     """
-    智能对话接口 (支持个性化)
+    智能对话接口 (强制登录)
     """
     try:
         from  service.diancan_service import smart_chat
@@ -295,9 +298,9 @@ async def chat_endpoint(request: ChatRequest, current_user: dict = Depends(get_o
         )
 
 @app.post("/chat/stream")
-async def chat_stream_endpoint(request: ChatRequest, current_user: dict = Depends(get_optional_user)):
+async def chat_stream_endpoint(request: ChatRequest, current_user: dict = Depends(get_current_user)):
     """
-    智能对话接口 (流式输出，支持个性化)
+    智能对话接口 (流式输出，强制登录)
     """
     from agent.assistant import chat_with_assistant_stream
     from fastapi.responses import StreamingResponse
@@ -313,8 +316,8 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: dict = Depend
 
 
 @app.get("/menu/list", response_model=MenuListResponse)
-async def menu_list_endpoint():
-    """菜品列表区域展示"""
+async def menu_list_endpoint(current_user: dict = Depends(get_current_user)):
+    """菜品列表区域展示 (需要登录)"""
 
     # 1.调用service
     from  service.diancan_service import get_menu
@@ -341,11 +344,9 @@ async def menu_list_endpoint():
 
 
 @app.post("/delivery", response_model=DeliveryResponse)
-async def delivery_endpoint(request: DeliveryRequest):
+async def delivery_endpoint(request: DeliveryRequest, current_user: dict = Depends(get_current_user)):
     """
-    配送查询接口
-
-    检查指定地址是否在配送范围内
+    配送查询接口 (需要登录)
     """
 
     # 1.导入service

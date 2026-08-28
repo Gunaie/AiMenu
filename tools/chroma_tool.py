@@ -48,8 +48,11 @@ class ChromaVectorDB:
     def initialize_connection(self) -> bool:
         """初始化ChromaDB客户端对象以及集合对象，并加载 BM25 语料"""
         try:
-            # 1. 初始化客户端对象
-            self.client = chromadb.PersistentClient(path=self.persist_directory)
+            # 1. 初始化客户端对象 (禁用匿名遥测以避免 posthog 版本冲突)
+            self.client = chromadb.PersistentClient(
+                path=self.persist_directory,
+                settings=Settings(anonymized_telemetry=False)
+            )
 
             # 2. 获取或创建集合对象
             self.collection = self.client.get_or_create_collection(
@@ -58,12 +61,17 @@ class ChromaVectorDB:
             )
             
             # 3. 初始化 BM25 语料
-            self._init_bm25_corpus()
+            try:
+                self._init_bm25_corpus()
+            except Exception as e:
+                logger.error(f"加载 BM25 语料库失败: {e}")
+                # BM25 失败不影响基础向量搜索，但记录日志
             
             logger.info("初始化向量数据库ChromaDB及 BM25 语料成功")
             return True
         except Exception as e:
             logger.error(f"初始化向量数据库ChromaDB失败:{e}")
+            self.collection = None # 确保 collection 为 None 表示不可用
             return False
 
     def _init_bm25_corpus(self):
@@ -71,22 +79,33 @@ class ChromaVectorDB:
         if not self.collection:
             return
         
-        results = self.collection.get(include=["metadatas", "documents"])
-        if results['ids']:
-            self.corpus = []
-            self.corpus_metadatas = []
-            tokenized_corpus = []
-            
-            for i in range(len(results['ids'])):
-                content = results['metadatas'][i]['content']
-                self.corpus.append(content)
-                self.corpus_metadatas.append(results['metadatas'][i])
-                # 使用 jieba 进行分词
-                tokenized_corpus.append(list(jieba.cut(content)))
-            
-            if tokenized_corpus:
-                self.bm25 = BM25Okapi(tokenized_corpus)
-                logger.info(f"BM25 语料库加载完成，共 {len(self.corpus)} 条记录")
+        try:
+            results = self.collection.get(include=["metadatas", "documents"])
+            if results['ids']:
+                self.corpus = []
+                self.corpus_metadatas = []
+                tokenized_corpus = []
+                
+                for i in range(len(results['ids'])):
+                    metadata = results['metadatas'][i]
+                    if not metadata or 'content' not in metadata:
+                        continue
+                        
+                    content = metadata['content']
+                    if not isinstance(content, str):
+                        content = str(content)
+                        
+                    self.corpus.append(content)
+                    self.corpus_metadatas.append(metadata)
+                    # 使用 jieba 进行分词
+                    tokenized_corpus.append(list(jieba.cut(content)))
+                
+                if tokenized_corpus:
+                    self.bm25 = BM25Okapi(tokenized_corpus)
+                    logger.info(f"BM25 语料库加载完成，共 {len(self.corpus)} 条记录")
+        except Exception as e:
+            logger.error(f"BM25 语料库初始化内部失败: {e}")
+            raise e
 
     def clear_index_vectors(self) -> bool:
         """清空指定集合下的向量数据"""
@@ -147,14 +166,11 @@ class ChromaVectorDB:
         return not validation_content.startswith(validate_result_str)
 
     def _splite_content(self, splite_content: str) -> List[str]:
-        """切割加载到的菜品信息"""
+        """切割加载到的菜品信息 (按行切分，确保每道菜是一个独立单元)"""
         try:
-            from langchain_text_splitters import RecursiveCharacterTextSplitter
-            text_spliter = RecursiveCharacterTextSplitter(chunk_size=100, chunk_overlap=0, separators=["\n"], length_function=len)
-            docs = text_spliter.create_documents([splite_content])
-            clearn_docs = [doc.page_content.strip() for doc in docs]
-            print(f"菜品信息切割后的块个数：{len(clearn_docs)}")
-            return clearn_docs
+            lines = [line.strip() for line in splite_content.split('\n') if line.strip()]
+            print(f"菜品信息切割后的块个数：{len(lines)}")
+            return lines
         except Exception as e:
             logger.error(f"文本切割失败:{e}")
             return []

@@ -22,11 +22,11 @@ def  check_delivery_range(address:str,model:PathInputModel):
 
 
 
-def  smart_chat(user_query:str, session_id: str = "default", user_info: dict = None):
+async def  smart_chat(user_query:str, session_id: str = "default", user_info: dict = None):
     """对话接口"""
     from  agent.assistant import chat_with_assistant
 
-    return chat_with_assistant(user_query, session_id, user_info=user_info)
+    return await chat_with_assistant(user_query, session_id, user_info=user_info)
 
 
 def submit_order(order_data: dict):

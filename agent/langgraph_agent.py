@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import re
-from typing import Annotated, TypedDict, List, Dict, Any, Union
+from typing import Annotated, TypedDict, List, Dict, Any, Union, Optional
 
 from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableConfig

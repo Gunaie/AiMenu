@@ -32,51 +32,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # 后端 API 服务
-  backend:
-    build: .
-    container_name: smart-diancan-backend
-    restart: always
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    env_file:
-      - .env
-    environment:
-      - API_HOST=0.0.0.0
-      - API_PORT=8001
-      - MYSQL_HOST=db
-      - MYSQL_PORT=3306
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-    ports:
-      - "8001:8001"
-    volumes:
-      - chroma_data:/app/chroma_db
-      - .:/app
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/healthy"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # 前端 UI 服务 (通过 Nginx 暴露)
-  frontend:
-    build: ./ui
-    container_name: smart-diancan-frontend
-    restart: always
-    depends_on:
-      - backend
-    ports:
-      - "80:80"
-    networks:
-      default:
-        aliases:
-          - ui
-
 volumes:
   mysql_data:
-  chroma_data:
   redis_data:

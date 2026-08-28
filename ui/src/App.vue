@@ -20,7 +20,7 @@
       </div>
     </div>
 
-    <el-container class="main-container">
+    <el-container class="main-container" :class="{ 'is-blurred': !currentUser }">
       <!-- 侧边栏：菜品展示 -->
       <el-aside width="400px" class="menu-sidebar">
         <div class="sidebar-header">
@@ -312,11 +312,14 @@
       </div>
     </el-drawer>
 
-    <!-- 登录/注册对话框 -->
+    <!-- 登录/注册对话框 (强制登录) -->
     <el-dialog
       v-model="showLogin"
       :title="isLoginMode ? '欢迎回来' : '开启美食之旅'"
       width="380px"
+      :close-on-click-modal="false"
+      :close-on-press-escape="false"
+      :show-close="!!currentUser"
       append-to-body
       class="auth-dialog"
     >
@@ -393,6 +396,13 @@ export default {
           currentUser.value = { username: res.username, nickname: res.nickname }
           ElMessage.success(`欢迎回来，${res.nickname}！`)
           showLogin.value = false
+          
+          // 登录后加载必要数据
+          await Promise.all([
+            loadMenuItems(),
+            loadRestaurantInfo()
+          ])
+          
           // 登录后自动发送个性化招呼语
           await sendInitialGreeting()
         } else {
@@ -423,7 +433,7 @@ export default {
     const sendInitialGreeting = async () => {
       const greeting = `小二，我来啦！`
       chatHistory.value.push({ role: 'user', content: greeting })
-      await sendMessage(greeting)
+      await sendChatQuery(greeting)
     }
 
     const sessionId = ref('session-' + Math.random().toString(36).substring(2, 9))
@@ -822,16 +832,29 @@ export default {
       return `/images/${name}.png`
     }
 
-    onMounted(() => {
-      loadMenuItems()
-      loadRestaurantInfo()
-      
+    onMounted(async () => {
       // 监听未授权事件
       window.addEventListener('unauthorized', () => {
         currentUser.value = null
         showLogin.value = true
         ElMessage.warning('请先登录')
       })
+
+      if (currentUser.value) {
+        try {
+          // 验证 Token 是否依然有效
+          await authAPI.getMe()
+          await Promise.all([
+            loadMenuItems(),
+            loadRestaurantInfo()
+          ])
+        } catch (e) {
+          // getMe 失败会自动触发 unauthorized 事件，由拦截器处理
+          console.log('Token 验证失败，已清除登录态')
+        }
+      } else {
+        showLogin.value = true
+      }
     })
 
     return {
@@ -932,6 +955,12 @@ body {
 .main-container {
   flex: 1;
   overflow: hidden;
+  transition: filter 0.3s ease;
+}
+
+.main-container.is-blurred {
+  filter: blur(8px);
+  pointer-events: none;
 }
 
 /* Sidebar Styling */
