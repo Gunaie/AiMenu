@@ -1,18 +1,23 @@
-version: '3.8'
-
 services:
+  # 数据库服务
   db:
     image: mysql:8.0
     container_name: smart-diancan-db
     restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: smart_diancan
+      MYSQL_ROOT_PASSWORD: ${MYSQL_USER_PASSWORD:-root}
+      MYSQL_DATABASE: ${MYSQL_DB_NAME:-menu}
     ports:
-      - "3306:3306"
+      - "3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_USER_PASSWORD:-root}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
+  # Redis 缓存服务
   redis:
     image: redis:7.0-alpine
     container_name: smart-diancan-redis
@@ -21,26 +26,43 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
+  # 后端 API 服务
   backend:
     build: .
     container_name: smart-diancan-backend
     restart: always
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
     environment:
-      - DB_HOST=db
-      - DB_PORT=3306
-      - DB_USER=root
-      - DB_PASSWORD=root
-      - DB_NAME=smart_diancan
-      - DASHSCOPE_API_KEY=sk-e835f544a996476eb0393c3d430a8008
-      - DASHSCOPE_MODEL_NAME=qwen3.7-flash
+      - API_HOST=0.0.0.0
+      - API_PORT=8001
+      - MYSQL_HOST=db
+      - MYSQL_PORT=3306
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     ports:
-      - "8000:8000"
+      - "8001:8001"
     volumes:
       - chroma_data:/app/chroma_db
+      - .:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
+  # 前端 UI 服务 (通过 Nginx 暴露)
   frontend:
     build: ./ui
     container_name: smart-diancan-frontend
@@ -49,6 +71,10 @@ services:
       - backend
     ports:
       - "80:80"
+    networks:
+      default:
+        aliases:
+          - ui
 
 volumes:
   mysql_data:

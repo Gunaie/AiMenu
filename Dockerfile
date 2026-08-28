@@ -6,8 +6,10 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
-    software-properties-common \
     && rm -rf /var/lib/apt/lists/*
+
+# 设置 pip 镜像源以加速下载
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 复制依赖文件
 COPY requirements.txt .
@@ -22,8 +24,8 @@ COPY . .
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# 暴露端口
-EXPOSE 8000
+# 暴露端口 (与 run.py 中配置一致)
+EXPOSE 8001
 
 # 启动命令
 CMD ["python", "run.py"]

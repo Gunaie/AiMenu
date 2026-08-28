@@ -1,0 +1,30 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node (Frontend)
+ui/node_modules/
+ui/dist/
+
+# Databases & Data
+chroma_db/
+mysql_data/
+redis_data/
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db

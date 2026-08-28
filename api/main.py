@@ -19,6 +19,23 @@ app=FastAPI(title="智能点餐助手的API接口",description="智能点餐应�
 async def startup_event():
     from tools.db_tool import init_db
     init_db()
+    
+    # 同步向量数据库
+    try:
+        from tools.chroma_tool import chroma_db
+        # 如果集合为空，则进行初始化同步
+        if not chroma_db.collection:
+            chroma_db.initialize_connection()
+        
+        # 检查是否需要同步数据 (如果 ids 为空)
+        results = chroma_db.collection.get(limit=1)
+        if not results['ids']:
+            logger.info("向量数据库为空，开始初始化同步...")
+            chroma_db.upsert_menu_data(clear_existing=True)
+        else:
+            logger.info("向量数据库已就绪")
+    except Exception as e:
+        logger.error(f"启动时同步向量数据库失败: {e}")
 
 
 
