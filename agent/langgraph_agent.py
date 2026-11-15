@@ -146,7 +146,8 @@ class SmartRestaurantGraph:
                                     if dish_name in response.content:
                                         if i < len(data.get("menu_ids", [])):
                                             recommended_ids.append(str(data["menu_ids"][i]))
-                    except:
+                    except (json.JSONDecodeError, TypeError, AttributeError, IndexError) as parse_err:
+                        logger.debug(f"解析工具返回的菜品信息失败: {parse_err}")
                         continue
         
         logger.info(f"LangGraph Node: agent - Done, duration: {time.time()-start_t:.4f}s")

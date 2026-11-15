@@ -32,6 +32,53 @@ services:
       timeout: 5s
       retries: 5
 
+  # 后端服务：仅在 --profile full 时启动，避免与本机开发进程争抢 8001 端口
+  backend:
+    profiles: ["full"]
+    build: .
+    container_name: smart-diancan-backend
+    restart: always
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 8001
+      MYSQL_HOST: db
+      MYSQL_PORT: 3306
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    ports:
+      - "8001:8001"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthy').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # 前端服务：Nginx 托管构建产物，/api 反向代理到 backend
+  web:
+    profiles: ["full"]
+    build: ./ui
+    container_name: smart-diancan-web
+    restart: always
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
 volumes:
   mysql_data:
   redis_data:

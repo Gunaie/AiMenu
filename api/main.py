@@ -52,7 +52,8 @@ async def get_optional_user(token: str = Depends(oauth2_scheme)) -> Optional[dic
         if username is None:
             return None
         return get_user_by_username(username)
-    except:
+    except Exception as exc:
+        logger.debug(f"可选登录态解析失败: {exc}")
         return None
 
 def send_notification(order_no: str):

@@ -8,8 +8,8 @@
 AiMenu 是一个可本地运行的全栈 AI 点餐项目：FastAPI 提供业务接口，LangGraph 编排工具调用型 Agent，
 ChromaDB + BM25 + Rerank 完成菜品检索，高德地图负责配送范围校验，Vue 3 + Element Plus 提供点餐界面。
 
-> 指标说明：以下检索指标由 `scripts/eval_rag.py` 在 12 道菜品的本地语料上实测（36 条标注），
-> 可通过同一脚本复现；小规模语料下的绝对值不代表大规模场景效果。
+> 指标说明：以下检索指标由 `scripts/eval_rag.py` 在 153 道菜品的本地语料、150 条标注上实测，
+> 可通过同一脚本复现；语料为模拟数据，绝对值不代表线上大规模场景效果。
 
 ---
 
@@ -31,7 +31,7 @@ ChromaDB + BM25 + Rerank 完成菜品检索，高德地图负责配送范围校�
 | AI | LangGraph、LangChain、Qwen-Plus（DashScope）、text-embedding-v4、gte-rerank |
 | 检索 | ChromaDB、rank_bm25、jieba |
 | 存储 | MySQL 8、Redis 7 |
-| 前端 | Vue 3、Element Plus、Vite |
+| 前端 | Vue 3、Element Plus、Pinia、Vite |
 | 部署 | Docker / Docker Compose |
 
 ---
@@ -46,8 +46,10 @@ AiMenu/
 ├── tools/              # MySQL / Redis / ChromaDB / 高德 / JWT 工具
 ├── tests/              # 单元测试与接口测试
 ├── scripts/            # 检索评测脚本
-├── ui/                 # Vue 3 前端工程
-├── docker-compose.yml  # MySQL(3307) + Redis(6379)
+├── data/               # 菜品数据（153 道）与检索评测标注（150 条）
+├── ui/                 # Vue 3 前端工程（components + Pinia stores）
+├── .github/workflows/  # CI：后端 pytest + 前端构建
+├── docker-compose.yml  # 默认 MySQL(3307) + Redis(6379)，full 模式含前后端
 ├── Dockerfile          # 后端镜像
 ├── setup_db.py         # 建表 + 菜品数据初始化 + 向量同步
 ├── run.py              # 后端启动入口
@@ -85,7 +87,7 @@ uv venv --python 3.10
 .venv\Scripts\activate        # macOS/Linux: source .venv/bin/activate
 uv pip install -r requirements.txt
 
-python setup_db.py            # 建表 + 12 道菜品 + 向量入库（仅首次）
+python setup_db.py            # 建表 + 153 道菜品 + 向量入库（可重复执行）
 python run.py
 ```
 
@@ -110,6 +112,18 @@ docker build -t aimenu-web ./ui
 
 `ui/nginx.conf` 已包含 `/api` 反向代理与 SSE 关闭缓冲的配置。
 
+也可以直接用 Compose 拉起完整环境（db + redis + backend + web）：
+
+```bash
+copy .env.example .env      # 填写 DASHSCOPE_API_KEY / AMAP_API_KEY
+docker compose --profile full up -d --build
+# 首次启动后初始化菜品与向量数据
+docker compose --profile full run --rm backend python setup_db.py
+```
+
+前端访问 http://localhost:8080 ，后端 http://localhost:8001 。不带 `--profile full` 时
+`docker compose up -d` 仍只启动 MySQL 与 Redis，方便在本机直接跑后端开发服务。
+
 ---
 
 ## 测试与评测
@@ -125,18 +139,21 @@ python scripts/eval_rag.py --top-k 3 --json eval_result.json
 RUN_INTEGRATION=1 pytest tests/test_retrieval.py -s
 ```
 
-`scripts/eval_rag.py` 内置 36 条「query → 期望菜品」标注，分别统计纯向量检索与混合检索的
-Recall@K 和 MRR；若 Embedding 接口不可用，脚本会直接中止而不是输出失真指标。
+`data/eval_labels.json` 内置 150 条「query → 期望菜品」标注，覆盖 153 道菜品的全部条目，
+分别统计纯向量检索、向量 + BM25 融合（RRF）、混合检索（+Rerank）的 Recall@K 和 MRR；
+若 Embedding 接口不可用，脚本会直接中止而不是输出失真指标。
 
-### 实测结果（Top-3，Rerank 已启用）
+### 实测结果（Top-3，153 道菜品，150 条标注）
 
 | 检索策略 | Recall@3 | MRR |
 | --- | --- | --- |
-| 纯向量检索 | 0.9167 | 0.8472 |
-| 向量 + BM25 + Rerank | **1.0000** | **0.9583** |
+| 纯向量检索 | 0.9733 | 0.9456 |
+| 向量 + BM25 融合（RRF） | 0.9600 | 0.9333 |
+| 向量 + BM25 + Rerank | **0.9800** | **0.9600** |
 
-语料为 `setup_db.py` 初始化的 12 道菜，标注集见 `scripts/eval_rag.py` 中的 `LABELED_QUERIES`。
-语料规模较小，指标主要用于验证链路与回归对比，不构成大规模检索效果的结论。
+数据来源：`data/menu_items.json`（菜品）、`data/eval_labels.json`（标注，含 40 条菜名直查、
+40 条口语化改写、50 条属性组合、20 条菜系/分类查询）。Embedding 接口存在少量随机性，
+重跑指标会有 ±0.01 波动；混合检索在剩余 3 条失败样本上均为不含菜名的强口语改写。
 
 ---
 
@@ -153,9 +170,8 @@ Recall@K 和 MRR；若 Embedding 接口不可用，脚本会直接中止而不�
 
 - Agent 记忆使用进程内 `MemorySaver`，重启即丢失，暂不支持多实例部署。
 - 数据库访问与地图请求为同步实现，在 async 路由中直接调用会阻塞事件循环，高并发场景需改为异步驱动或线程池。
-- 菜单仅 12 条，检索指标不代表大规模语料下的效果。
+- 菜品与标注均为 153 道 / 150 条的本地模拟数据，指标用于链路验证与回归对比；不含菜名的口语化改写仍是主要失误来源。
 - 支付为模拟实现，未接入真实支付渠道；通知推送为 `BackgroundTasks` 占位逻辑。
-- 菜品 `category` 字段与前端筛选（川菜/粤菜/浙菜）尚未完全对齐。
 
 ---
 
