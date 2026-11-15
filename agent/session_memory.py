@@ -28,12 +28,18 @@ class RedisSessionMemory:
         self.max_turns = max_turns if max_turns is not None else int(os.getenv("AGENT_MEMORY_TURNS", "6"))
 
     @staticmethod
-    def _key(session_id: str) -> str:
-        return f"{KEY_PREFIX}{session_id}"
+    def _key(session_id: str, user_id: int = None) -> str:
+        """会话 key 必须带上用户维度
 
-    def load(self, session_id: str) -> List[BaseMessage]:
+        session_id 由客户端生成并传入，如果只按它分键，任何登录用户拿到他人的
+        session_id 就能把自己接进对方的历史。这里统一按 user_id 隔离。
+        """
+        owner = str(user_id) if user_id is not None else "anonymous"
+        return f"{KEY_PREFIX}{owner}:{session_id}"
+
+    def load(self, session_id: str, user_id: int = None) -> List[BaseMessage]:
         """读取会话历史并还原为 LangChain 消息"""
-        records = cache.get(self._key(session_id)) or []
+        records = cache.get(self._key(session_id, user_id)) or []
         messages: List[BaseMessage] = []
         for record in records:
             content = (record or {}).get("content")
@@ -45,16 +51,17 @@ class RedisSessionMemory:
                 messages.append(AIMessage(content=content))
         return messages
 
-    def append_turn(self, session_id: str, user_query: str, answer: str) -> None:
+    def append_turn(self, session_id: str, user_query: str, answer: str,
+                    user_id: int = None) -> None:
         """追加一轮问答，并按窗口截断旧历史（TTL 每轮续期）"""
         if not user_query or not answer:
             return
-        records = cache.get(self._key(session_id)) or []
+        records = cache.get(self._key(session_id, user_id)) or []
         records.append({"role": "human", "content": user_query})
         records.append({"role": "ai", "content": answer})
         records = records[-self.max_turns * 2:]
-        cache.set(self._key(session_id), records, expire=self.ttl)
+        cache.set(self._key(session_id, user_id), records, expire=self.ttl)
 
-    def clear(self, session_id: str) -> None:
+    def clear(self, session_id: str, user_id: int = None) -> None:
         """清空指定会话历史（供“重新开始”之类操作使用）"""
-        cache.delete(self._key(session_id))
+        cache.delete(self._key(session_id, user_id))

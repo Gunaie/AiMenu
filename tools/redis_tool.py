@@ -60,5 +60,18 @@ class RedisCache:
         except Exception as e:
             logger.error(f"Redis DELETE 失败 [{key}]: {e}")
 
+    def incr_with_ttl(self, key: str, expire: int = 60) -> Optional[int]:
+        """原子自增并设置过期时间，用于限流计数；Redis 不可用时返回 None（调用方放行）"""
+        if not self.client:
+            return None
+        try:
+            value = self.client.incr(key)
+            if value == 1:
+                self.client.expire(key, expire)
+            return int(value)
+        except Exception as e:
+            logger.error(f"Redis INCR 失败 [{key}]: {e}")
+            return None
+
 # 全局单例
 cache = RedisCache()

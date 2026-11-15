@@ -16,7 +16,9 @@ from tools.auth_tool import (
     get_password_hash, verify_password, create_access_token, decode_access_token
 )
 from tools.db_tool import get_user_by_username, create_user
+from tools.redis_tool import cache
 import  logging
+import  os
 import  time
 
 logging.basicConfig(level=logging.INFO)
@@ -60,6 +62,29 @@ async def get_optional_user(token: str = Depends(oauth2_scheme)) -> Optional[dic
         logger.debug(f"可选登录态解析失败: {exc}")
         return None
 
+# 对话接口限流：每个用户每分钟最多 N 次，0 表示关闭
+CHAT_RATE_LIMIT_PER_MINUTE = int(os.getenv("CHAT_RATE_LIMIT_PER_MINUTE", "20"))
+
+
+async def get_chat_user(current_user: dict = Depends(get_current_user)) -> dict:
+    """对话接口限流依赖
+
+    按「用户 + 分钟」在 Redis 计数，避免单个账号刷爆 LLM 额度；
+    Redis 不可用时放行，不阻断正常业务。
+    """
+    if CHAT_RATE_LIMIT_PER_MINUTE <= 0:
+        return current_user
+    window = int(time.time() // 60)
+    key = f"aimenu:ratelimit:chat:{current_user['id']}:{window}"
+    count = cache.incr_with_ttl(key, expire=70)
+    if count is not None and count > CHAT_RATE_LIMIT_PER_MINUTE:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="客官问得有点急，请稍等片刻再试",
+            headers={"Retry-After": "60"},
+        )
+    return current_user
+
 def send_notification(order_no: str):
     """模拟异步发送订单通知（如邮件或微信推送）"""
     logger.info(f"开始为订单 {order_no} 准备通知推送...")
@@ -72,26 +97,19 @@ app=FastAPI(title="智能点餐助手的API接口",description="智能点餐应�
 async def startup_event():
     from tools.db_tool import init_db
     init_db()
-    
-    # 同步向量数据库
+
+    # 只做连接与就绪检查：向量入库属于离线初始化（setup_db.py），
+    # 放到启动阶段会在多 worker 下重复执行并互相争抢 Chroma 写锁。
     try:
         from tools.chroma_tool import chroma_db
-        # 如果集合为空，则进行初始化同步
-        if not chroma_db.collection:
-            chroma_db.initialize_connection()
-        
-        if chroma_db.collection:
-            # 检查是否需要同步数据 (如果 ids 为空)
-            results = chroma_db.collection.get(limit=1)
-            if not results['ids']:
-                logger.info("向量数据库为空，开始初始化同步...")
-                chroma_db.upsert_menu_data(clear_existing=True)
-            else:
-                logger.info("向量数据库已就绪")
+        if not chroma_db.collection and not chroma_db.initialize_connection():
+            logger.error("向量数据库连接初始化失败，请检查 chroma_db 目录")
+        elif chroma_db.collection and chroma_db.collection.count() == 0:
+            logger.warning("向量数据库为空，请先执行 python setup_db.py 完成菜品向量入库")
         else:
-            logger.error("向量数据库连接初始化失败，跳过同步")
+            logger.info("向量数据库已就绪")
     except Exception as e:
-        logger.error(f"启动时同步向量数据库失败: {e}")
+        logger.error(f"启动时检查向量数据库失败: {e}")
 
 
 
@@ -279,7 +297,7 @@ async def restaurant_info_endpoint(current_user: dict = Depends(get_current_user
     )
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest, current_user: dict = Depends(get_current_user)):
+async def chat_endpoint(request: ChatRequest, current_user: dict = Depends(get_chat_user)):
     """
     智能对话接口 (强制登录)
     """
@@ -313,7 +331,7 @@ async def chat_endpoint(request: ChatRequest, current_user: dict = Depends(get_c
         )
 
 @app.post("/chat/stream")
-async def chat_stream_endpoint(request: ChatRequest, current_user: dict = Depends(get_current_user)):
+async def chat_stream_endpoint(request: ChatRequest, current_user: dict = Depends(get_chat_user)):
     """
     智能对话接口 (流式输出，强制登录)
     """
@@ -399,9 +417,17 @@ def delivery_endpoint(request: DeliveryRequest, current_user: dict = Depends(get
         )
     except Exception as e:
         logger.error(f"配送范围查询失败；{e}")
+        # 必须回填全部必填字段，否则响应模型校验失败会变成 500
         return DeliveryResponse(
             success=False,
-            message=f"配送范围查询失败{e}"
+            in_range=False,
+            distance=0.0,
+            formatted_address=request.address,
+            duration=0.0,
+            delivery_fee=0.0,
+            message=f"配送范围查询失败：{e}",
+            travel_mode=request.travel_mode,
+            input_address=request.address
         )
 
 

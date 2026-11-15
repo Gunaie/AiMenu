@@ -43,6 +43,10 @@ class SmartRestaurantGraph:
             base_url=self.api_base,
             temperature=0.7,
             streaming=True,
+            timeout=float(os.getenv("LLM_TIMEOUT_SECONDS", "30")),
+            max_retries=int(os.getenv("LLM_MAX_RETRIES", "2")),
+            # 流式模式下也返回 token 用量，便于统计成本
+            stream_usage=True,
             extra_body=extra_body or None
         )
         
@@ -114,11 +118,13 @@ class SmartRestaurantGraph:
             return messages
         return messages[:-1] + [last.model_copy(update={"tool_calls": patched})]
 
-    async def _run_tools(self, state: AgentState):
+    async def _run_tools(self, state: AgentState, config: RunnableConfig):
         """工具节点：执行前补齐当前用户身份"""
         user_info = state.get("user_info") or {}
         messages = self._inject_user_id(state["messages"], user_info.get("id"))
-        return await self.tool_node.ainvoke({"messages": messages})
+        # 必须透传 config：LangGraph 新版会校验节点运行所需的 config key，
+        # 不传会直接抛 "Missing required config key"。
+        return await self.tool_node.ainvoke({"messages": messages}, config=config)
 
     async def call_model(self, state: AgentState, config: RunnableConfig):
         """调用 LLM 决策或生成回复"""
@@ -184,6 +190,15 @@ class SmartRestaurantGraph:
                         continue
         
         logger.info(f"LangGraph Node: agent - Done, duration: {time.time()-start_t:.4f}s")
+        usage = getattr(response, "usage_metadata", None) or {}
+        if usage:
+            logger.info(
+                "LLM token usage: model=%s prompt=%s completion=%s total=%s",
+                self.model_name,
+                usage.get("input_tokens"),
+                usage.get("output_tokens"),
+                usage.get("total_tokens"),
+            )
         return {
             "messages": [response],
             "menu_ids": recommended_ids,
@@ -194,9 +209,10 @@ class SmartRestaurantGraph:
     async def astream_run(self, user_query: str, session_id: str = "default", user_info: Dict[str, Any] = None):
         """异步流式运行"""
         config = {"configurable": {"thread_id": session_id}}
+        user_id = (user_info or {}).get("id")
 
         # 先取出该会话的持久化历史，再拼上本轮提问
-        history = self.memory_store.load(session_id)
+        history = self.memory_store.load(session_id, user_id=user_id)
         initial_state = {
             "messages": history + [HumanMessage(content=user_query)],
             "user_info": user_info
@@ -242,13 +258,14 @@ class SmartRestaurantGraph:
             yield {"type": "error", "content": f"小二忙不过来了，请客官稍后再试。(错误详情: {str(e)})"}
         else:
             # 只有完整跑完的轮次才写入记忆，避免把半截回复固化
-            self.memory_store.append_turn(session_id, user_query, "".join(answer_parts))
+            self.memory_store.append_turn(session_id, user_query, "".join(answer_parts), user_id=user_id)
 
     async def run(self, user_query: str, session_id: str = "default", user_info: Dict[str, Any] = None):
         """同步运行流程"""
         config = {"configurable": {"thread_id": session_id}}
+        user_id = (user_info or {}).get("id")
 
-        history = self.memory_store.load(session_id)
+        history = self.memory_store.load(session_id, user_id=user_id)
         initial_state = {
             "messages": history + [HumanMessage(content=user_query)],
             "user_info": user_info
@@ -260,7 +277,7 @@ class SmartRestaurantGraph:
         )
         
         response = final_state.get("final_response", "客官久等了，小二没能听清您的需求。")
-        self.memory_store.append_turn(session_id, user_query, response)
+        self.memory_store.append_turn(session_id, user_query, response, user_id=user_id)
         return {
             "response": response,
             "menu_ids": final_state.get("menu_ids", [])

@@ -18,10 +18,18 @@ export const useChatStore = defineStore('chat', () => {
     })
   }
 
+  const escapeHtml = (text) =>
+    text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+
   const renderMarkdown = (text) => {
     if (!text) return ''
-    // 简单 Markdown 渲染逻辑优化
-    let html = text
+    // 先转义 HTML 再做 Markdown 替换，避免模型回显用户输入时注入标签
+    let html = escapeHtml(text)
       .replace(/#{3} (.*?)$/gm, '<h3>$1</h3>')
       .replace(/#{2} (.*?)$/gm, '<h2>$1</h2>')
       .replace(/#{1} (.*?)$/gm, '<h1>$1</h1>')

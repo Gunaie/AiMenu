@@ -3,6 +3,7 @@
 通过 override 依赖注入模拟登录用户，不触发启动事件，也不访问真实数据库与地图 API。
 """
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from api.main import app, get_current_user
@@ -114,3 +115,44 @@ def test_submit_order_rejects_out_of_range_address(authed_user, monkeypatch):
     assert response.status_code == 200
     assert response.json()["success"] is False
     assert "超出配送范围" in response.json()["message"]
+
+
+def test_delivery_failure_returns_full_payload(authed_user, monkeypatch):
+    """高德接口异常时应返回结构化失败结果，而不是 500"""
+    def _boom(address, mode):
+        raise RuntimeError("amap unavailable")
+
+    monkeypatch.setattr("service.diancan_service.check_delivery_range", _boom)
+
+    response = client.post("/delivery", json={"address": "洪山区", "travel_mode": "2"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is False
+    assert body["in_range"] is False
+    assert body["travel_mode"] == "2"
+    assert body["input_address"] == "洪山区"
+    assert "配送范围查询失败" in body["message"]
+
+
+@pytest.mark.asyncio
+async def test_chat_rate_limit_returns_429(monkeypatch):
+    from api.main import get_chat_user
+
+    monkeypatch.setattr("api.main.CHAT_RATE_LIMIT_PER_MINUTE", 2)
+    monkeypatch.setattr("api.main.cache.incr_with_ttl", lambda key, expire=70: 3)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await get_chat_user(USER)
+
+    assert exc_info.value.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_chat_rate_limit_fails_open_when_redis_down(monkeypatch):
+    from api.main import get_chat_user
+
+    monkeypatch.setattr("api.main.CHAT_RATE_LIMIT_PER_MINUTE", 2)
+    monkeypatch.setattr("api.main.cache.incr_with_ttl", lambda key, expire=70: None)
+
+    assert await get_chat_user(USER) == USER

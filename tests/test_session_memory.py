@@ -44,7 +44,17 @@ def test_append_turn_then_load_restores_messages(memory):
     assert [type(m) for m in messages] == [HumanMessage, AIMessage]
     assert messages[0].content == "有什么清淡的汤"
     assert messages[1].content == "推荐丝瓜蛋汤"
-    assert fake.expires["aimenu:agent:history:s1"] == 600
+    assert fake.expires["aimenu:agent:history:anonymous:s1"] == 600
+
+
+def test_session_is_isolated_between_users(memory):
+    store, _ = memory
+
+    store.append_turn("s1", "我的地址是洪山区", "好的客官", user_id=1)
+
+    assert len(store.load("s1", user_id=1)) == 2
+    # 另一个用户即使拿到同一个 session_id，也读不到别人的历史
+    assert store.load("s1", user_id=2) == []
 
 
 def test_append_turn_truncates_to_window(memory):

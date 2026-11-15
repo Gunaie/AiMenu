@@ -144,3 +144,30 @@ def test_inject_user_id_requires_login(graph):
     message = AIMessage(content="", tool_calls=[{"name": "query_order", "args": {}, "id": "call_q"}])
 
     assert graph._inject_user_id([message], None) == [message]
+
+
+class _FakeToolNode:
+    def __init__(self):
+        self.calls = []
+
+    async def ainvoke(self, payload, config=None):
+        self.calls.append((payload, config))
+        return {"messages": payload["messages"]}
+
+
+@pytest.mark.asyncio
+async def test_run_tools_passes_config_and_injects_user(graph):
+    """工具节点必须透传 config，否则新版 LangGraph 会直接抛错"""
+    fake = _FakeToolNode()
+    graph.tool_node = fake
+    config = {"configurable": {"thread_id": "t1"}}
+    message = AIMessage(
+        content="",
+        tool_calls=[{"name": "query_order", "args": {"order_no": "ORD100"}, "id": "call_q"}],
+    )
+
+    await graph._run_tools({"messages": [message], "user_info": {"id": 9}}, config)
+
+    payload, received_config = fake.calls[0]
+    assert received_config is config
+    assert payload["messages"][-1].tool_calls[0]["args"]["user_id"] == 9
