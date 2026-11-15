@@ -25,4 +25,6 @@ eval_result.json
 trae-sandbox/
 trae-preview/
 logs/
-docs/
+docs/*
+# 简历文案需要随仓库走，其余 docs 仍不纳入版本管理
+!docs/resume_bullets.md

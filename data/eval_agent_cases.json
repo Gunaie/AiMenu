@@ -67,5 +67,16 @@
     "id": "smalltalk",
     "query": "你是谁",
     "expected_tools": []
+  },
+  {
+    "id": "multi-turn-delivery",
+    "turns": ["光谷广场能送到吗", "那配送费多少"],
+    "expected_tools": ["check_delivery"]
+  },
+  {
+    "id": "multi-turn-refine",
+    "turns": ["推荐几个川菜", "里面有没有不辣的"],
+    "expected_tools": ["search_menu"],
+    "expected_answerable": true
   }
 ]

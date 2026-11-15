@@ -72,22 +72,65 @@ def _final_answer(messages):
     return ""
 
 
-async def evaluate(cases, user_id):
+def _build_judge_llm():
+    """构造仅用于评审的 LLM（不绑定工具，temperature=0）"""
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(
+        model=os.getenv("DASHSCOPE_MODEL_NAME", "qwen-plus"),
+        api_key=os.getenv("DASHSCOPE_API_KEY"),
+        base_url=os.getenv("DASHSCOPE_API_BASE"),
+        temperature=0,
+        timeout=30,
+        max_retries=1,
+    )
+
+
+async def _judge_refusal(llm, query, answer):
+    """用 LLM 判定回复是否拒绝了非点餐请求，返回 (是否拒答, 理由)"""
+    import json as _json
+
+    prompt = (
+        "你是对话评测员。用户向餐厅点餐助手提出了一个与点餐无关的请求。\n"
+        "判断助手的回复是否明确表示无法处理该请求，并把话题引导回点餐业务（菜品、订单、配送）。\n"
+        "只要回复明确拒绝或说明自己不负责该领域即算拒答，措辞不限。\n"
+        f"用户：{query}\n助手：{answer}\n\n"
+        '只输出 JSON，不要解释：{"refused": true 或 false, "reason": "不超过 30 字"}'
+    )
+    try:
+        response = await llm.ainvoke(prompt)
+        text = response.content.strip()
+        if text.startswith("```"):
+            text = text.split("```")[1].lstrip("json").strip()
+        payload = _json.loads(text)
+        return bool(payload.get("refused")), str(payload.get("reason", ""))[:60]
+    except Exception as exc:  # 评审失败不影响主流程
+        return None, f"评审失败: {exc}"
+
+
+async def evaluate(cases, user_id, judge=True):
     from langchain_core.messages import HumanMessage
     from agent.langgraph_agent import restaurant_agent
 
+    judge_llm = _build_judge_llm() if judge else None
     details = []
     for case in cases:
         started = time.time()
-        state = await restaurant_agent.app.ainvoke(
-            {
-                "messages": [HumanMessage(content=case["query"])],
-                "user_info": {"id": user_id, "username": "eval", "nickname": "评测"},
-            },
-            # LangGraph 的工具节点需要继承 config，缺失时会报 required config key
-            config={"configurable": {"thread_id": f"eval-{case['id']}"}},
-        )
-        messages = state.get("messages", [])
+        turns = case.get("turns") or [case["query"]]
+        thread_id = f"eval-{case['id']}"
+        messages = []
+        # 多轮用例在同一 thread 内依次对话，工具集合按整通对话统计
+        for turn in turns:
+            state = await restaurant_agent.app.ainvoke(
+                {
+                    "messages": [HumanMessage(content=turn)],
+                    "user_info": {"id": user_id, "username": "eval", "nickname": "评测"},
+                },
+                # LangGraph 的工具节点需要继承 config，缺失时会报 required config key
+                config={"configurable": {"thread_id": thread_id}},
+            )
+            messages = state.get("messages", [])
+
         actual_tools = _tool_names(messages)
         expected_tools = sorted(case.get("expected_tools", []))
         answer = _final_answer(messages)
@@ -98,15 +141,19 @@ async def evaluate(cases, user_id):
         # Rerank 不可用时 answerable 为 None，此时无法判断，不计入准确率
         definite_flags = [flag for flag in answerable_flags if flag is not None]
         if expected_answerable is not None and definite_flags:
-            answerable_ok = expected_answerable in definite_flags
+            answerable_ok = definite_flags[-1] == expected_answerable
 
         refusal_ok = None
+        judge_ok = None
+        judge_reason = ""
         if case.get("expect_refusal"):
             refusal_ok = any(word in answer for word in REFUSAL_KEYWORDS)
+            if judge_llm is not None:
+                judge_ok, judge_reason = await _judge_refusal(judge_llm, " ".join(turns), answer)
 
         details.append({
             "id": case["id"],
-            "query": case["query"],
+            "turns": turns,
             "expected_tools": expected_tools,
             "actual_tools": actual_tools,
             "tool_match": actual_tools == expected_tools,
@@ -114,6 +161,8 @@ async def evaluate(cases, user_id):
             "answerable_flags": answerable_flags,
             "answerable_ok": answerable_ok,
             "refusal_ok": refusal_ok,
+            "refusal_judge": judge_ok,
+            "refusal_judge_reason": judge_reason,
             "answer": answer,
             "latency_ms": round((time.time() - started) * 1000, 1),
         })
@@ -124,6 +173,8 @@ async def evaluate(cases, user_id):
     answerable_pass = sum(item["answerable_ok"] for item in answerable_items)
     refusal_items = [item for item in details if item["refusal_ok"] is not None]
     refusal_pass = sum(item["refusal_ok"] for item in refusal_items)
+    judge_items = [item for item in details if item["refusal_judge"] is not None]
+    judge_pass = sum(item["refusal_judge"] for item in judge_items)
 
     summary = {
         "case_count": total,
@@ -133,6 +184,9 @@ async def evaluate(cases, user_id):
         ),
         "refusal_accuracy": (
             round(refusal_pass / len(refusal_items), 4) if refusal_items else None
+        ),
+        "refusal_judge_accuracy": (
+            round(judge_pass / len(judge_items), 4) if judge_items else None
         ),
         "avg_latency_ms": round(sum(item["latency_ms"] for item in details) / total, 1) if total else 0.0,
     }
@@ -146,6 +200,8 @@ def main():
     parser.add_argument("--limit", type=int, default=0, help="只跑前 N 条，0 表示全部")
     parser.add_argument("--min-tool-accuracy", type=float, default=0.0,
                         help="工具选择准确率低于该值时以非零码退出，供 CI 使用")
+    parser.add_argument("--no-judge", action="store_true",
+                        help="关闭 LLM 评审，只用关键词判定拒答话术")
     parser.add_argument("--json", dest="json_path", help="将结果写入 JSON")
     args = parser.parse_args()
 
@@ -158,7 +214,7 @@ def main():
         cases = cases[:args.limit]
 
     try:
-        summary, details = asyncio.run(evaluate(cases, args.user_id))
+        summary, details = asyncio.run(evaluate(cases, args.user_id, judge=not args.no_judge))
     except Exception as exc:  # 依赖 MySQL / Redis / 模型，失败时明确中止
         print(f"[评测中止] {exc}")
         raise SystemExit(2)
@@ -171,12 +227,16 @@ def main():
             flags.append("拒答✓" if item["answerable_ok"] else "拒答✗")
         if item["refusal_ok"] is not None:
             flags.append("话术✓" if item["refusal_ok"] else "话术✗")
+        if item["refusal_judge"] is not None:
+            flags.append("评审✓" if item["refusal_judge"] else "评审✗")
         print(f"[{item['id']:<20}] {' '.join(flags)} | {item['latency_ms']}ms | {item['answer'][:40]}")
     print("-" * 68)
     print(
         f"用例 {summary['case_count']} | 工具准确率 {summary['tool_accuracy']:.4f} | "
         f"可回答判定 {summary['answerable_accuracy']} | "
-        f"拒答命中 {summary['refusal_accuracy']} | 平均耗时 {summary['avg_latency_ms']}ms"
+        f"拒答话术(关键词) {summary['refusal_accuracy']} | "
+        f"拒答话术(LLM 评审) {summary['refusal_judge_accuracy']} | "
+        f"平均耗时 {summary['avg_latency_ms']}ms"
     )
     print("=" * 68)
 

@@ -94,7 +94,7 @@ jobs:
       - name: Agent end-to-end eval
         if: always() && env.DASHSCOPE_API_KEY != ''
         run: |
-          python scripts/eval_agent.py --min-tool-accuracy 0.8 \
+          python scripts/eval_agent.py --min-tool-accuracy 0.8 --no-judge \
             --json agent_eval.json
       - name: Upload eval reports
         if: always()
