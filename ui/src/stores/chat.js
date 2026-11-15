@@ -95,9 +95,8 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   const sendInitialGreeting = async () => {
-    const greeting = '小二，我来啦！'
-    chatHistory.value.push({ role: 'user', content: greeting })
-    await sendChatQuery(greeting)
+    // 交给 sendChatQuery 统一追加用户消息，避免重复插入同一条问候
+    await sendChatQuery('小二，我来啦！')
   }
 
   return {
