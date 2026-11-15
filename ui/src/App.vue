@@ -57,10 +57,7 @@
 
         <div class="menu-filter">
           <el-radio-group v-model="activeCategory" size="small">
-            <el-radio-button label="全部" />
-            <el-radio-button label="川菜" />
-            <el-radio-button label="粤菜" />
-            <el-radio-button label="浙菜" />
+            <el-radio-button v-for="cat in categories" :key="cat" :label="cat" />
           </el-radio-group>
         </div>
 
@@ -522,6 +519,7 @@ export default {
           delivery_fee: deliveryResponse.value.delivery_fee,
           actual_amount: parseFloat(totalWithDelivery),
           delivery_address: deliveryResponse.value.formatted_address,
+          travel_mode: travelMode.value,
           items_detail: cart.value.map(item => ({
             id: item.id,
             dish_name: item.dish_name,
@@ -633,6 +631,12 @@ export default {
       const dish = menuItems.value.find(d => d.id.toString() === id.toString())
       return dish ? dish.dish_name : '未知菜品'
     }
+
+    // 分类来自后端菜品数据，避免与菜单实际分类不一致
+    const categories = computed(() => {
+      const names = menuItems.value.map(item => item.category).filter(Boolean)
+      return ['全部', ...new Set(names)]
+    })
 
     const filteredMenu = computed(() => {
       if (activeCategory.value === '全部') return menuItems.value
@@ -862,7 +866,7 @@ export default {
       handleAuth, handleUserCommand,
       chatQuery, chatHistory, chatLoading, chatWindow,
       deliveryAddress, travelMode, deliveryResponse, deliveryLoading, showDeliveryInput,
-      menuItems, menuLoading, highlightedItems, activeCategory, filteredMenu,
+      menuItems, menuLoading, highlightedItems, activeCategory, categories, filteredMenu,
       restaurantInfo,
       sendChatQuery, checkDelivery, loadMenuItems, getSpiceType, renderMarkdown,
       querySearchTips, handleSelectTip,
@@ -1536,5 +1540,35 @@ body {
   justify-content: flex-end;
   border-top: 1px solid #f0f0f0;
   padding-top: 12px;
+}
+
+/* 响应式布局：避免窄屏下右侧主区域被固定宽度侧边栏挤成 0 宽 */
+.main-container > .el-container {
+  min-width: 0;
+}
+
+@media (max-width: 1200px) {
+  .menu-sidebar {
+    width: 320px !important;
+  }
+}
+
+@media (max-width: 900px) {
+  .main-container {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .menu-sidebar {
+    width: 100% !important;
+    max-height: 45vh;
+    border-right: none;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .main-container > .el-container {
+    flex: 1;
+    min-height: 60vh;
+  }
 }
 </style>
