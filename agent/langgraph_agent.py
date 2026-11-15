@@ -48,6 +48,8 @@ class SmartRestaurantGraph:
         
         # 绑定工具到 LLM
         self.llm_with_tools = self.llm.bind_tools(restaurant_tools)
+        # 工具节点实例：执行前统一补齐用户身份
+        self.tool_node = ToolNode(restaurant_tools)
         
         # 构建图
         self.workflow = self._create_workflow()
@@ -60,7 +62,7 @@ class SmartRestaurantGraph:
         
         # 添加节点
         graph.add_node("agent", self.call_model)
-        graph.add_node("tools", ToolNode(restaurant_tools))
+        graph.add_node("tools", self._run_tools)
         
         # 设置入口
         graph.set_entry_point("agent")
@@ -88,6 +90,35 @@ class SmartRestaurantGraph:
         if last_message.tool_calls:
             return "continue"
         return "end"
+
+    @staticmethod
+    def _inject_user_id(messages: List[BaseMessage], user_id) -> List[BaseMessage]:
+        """把当前用户 ID 强制写进 query_order 的参数
+
+        订单查询工具本身接受可选的 user_id，若模型漏传就会退化为不过滤查询。
+        这里在工具执行前统一覆盖，保证只能查到自己名下的订单。
+        """
+        if not user_id or not messages:
+            return messages
+        last = messages[-1]
+        if not getattr(last, "tool_calls", None):
+            return messages
+        patched = []
+        changed = False
+        for call in last.tool_calls:
+            if call.get("name") == "query_order":
+                call = {**call, "args": {**(call.get("args") or {}), "user_id": user_id}}
+                changed = True
+            patched.append(call)
+        if not changed:
+            return messages
+        return messages[:-1] + [last.model_copy(update={"tool_calls": patched})]
+
+    async def _run_tools(self, state: AgentState):
+        """工具节点：执行前补齐当前用户身份"""
+        user_info = state.get("user_info") or {}
+        messages = self._inject_user_id(state["messages"], user_info.get("id"))
+        return await self.tool_node.ainvoke({"messages": messages})
 
     async def call_model(self, state: AgentState, config: RunnableConfig):
         """调用 LLM 决策或生成回复"""

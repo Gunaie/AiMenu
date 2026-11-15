@@ -118,3 +118,29 @@ def test_query_order_only_queries_current_user(monkeypatch):
     sql, params = cursor.calls[-1]
     assert "user_id" in sql
     assert params == ("ORD100", 7)
+
+
+def test_inject_user_id_overrides_model_arguments(graph):
+    message = AIMessage(
+        content="",
+        tool_calls=[{"name": "query_order", "args": {"order_no": "ORD100", "user_id": 1}, "id": "call_q"}],
+    )
+
+    injected = graph._inject_user_id([message], 7)
+
+    assert injected[-1].tool_calls[0]["args"] == {"order_no": "ORD100", "user_id": 7}
+
+
+def test_inject_user_id_leaves_other_tools_untouched(graph):
+    message = AIMessage(
+        content="",
+        tool_calls=[{"name": "search_menu", "args": {"query": "川菜"}, "id": "call_s"}],
+    )
+
+    assert graph._inject_user_id([message], 7) == [message]
+
+
+def test_inject_user_id_requires_login(graph):
+    message = AIMessage(content="", tool_calls=[{"name": "query_order", "args": {}, "id": "call_q"}])
+
+    assert graph._inject_user_id([message], None) == [message]

@@ -11,7 +11,7 @@ ChromaDB + BM25 + Rerank 完成菜品检索，高德地图负责配送范围校�
 ![智能点餐对话](screenshots/chat.png)
 
 > 真实运行截图：一次「有什么清淡不辣的汤推荐」的流式对话，Agent 调用检索工具后给出推荐，
-> 左侧菜单同步高亮「推荐」菜品，回复下方可直接加购。
+> 被推荐的菜品在左侧菜单标注「推荐」徽标，回复下方列出的菜品可直接加购。
 
 > 指标说明：以下检索指标由 `scripts/eval_rag.py` 在 153 道菜品的本地语料、150 条标注上实测，
 > 可通过同一脚本复现；语料为模拟数据，绝对值不代表线上大规模场景效果。
@@ -86,7 +86,7 @@ AiMenu/
 ├── data/               # 菜品（153 道）、检索标注（150 条）、域外问题集（18 条）
 ├── screenshots/        # README 展示用真实运行截图
 ├── ui/                 # Vue 3 前端工程（components + Pinia stores）
-├── .github/workflows/  # CI：后端 pytest + 前端构建
+├── .github/workflows/  # CI：后端 pytest + 前端构建（+ 可选检索评测）
 ├── docker-compose.yml  # 默认 MySQL(3307) + Redis(6379)，full 模式含前后端
 ├── Dockerfile          # 后端镜像
 ├── setup_db.py         # 建表 + 菜品数据初始化 + 向量同步
@@ -174,6 +174,7 @@ pytest -q
 python scripts/eval_rag.py --top-k 3 --json eval_result.json
 
 # 只评测可离线复现的融合链路（跳过 Rerank 与拒答）
+# PowerShell 写法：$env:USE_RERANK="false"; python scripts/eval_rag.py --top-k 3 --no-refusal
 USE_RERANK=false python scripts/eval_rag.py --top-k 3 --no-refusal
 
 # 接口压测（需后端已启动）
@@ -204,9 +205,9 @@ CI 中的 `retrieval-eval` job 默认不运行（真实评测会消耗 Embedding
 | 向量 + BM25 融合（RRF） | 0.9600 | 0.9344 |
 | 向量 + BM25 + Rerank（qwen3-vl-rerank） | **0.9933** | **0.9789** |
 
-数据来源：`data/menu_items.json`（菜品）、`data/eval_labels.json`（标注，含 40 条菜名直查、
-40 条口语化改写、50 条属性组合、20 条菜系/分类查询）。Embedding 接口存在少量随机性，
-重跑指标会有 ±0.01 波动；混合检索改造前的 3 条失败样本均为不含菜名的强口语改写。
+数据来源：`data/menu_items.json`（153 道菜品）、`data/eval_labels.json`（150 条标注，按 query 特征统计为
+40 条菜名直查、34 条菜系/分类、34 条口语化描述、23 条属性组合、19 条食材诉求如「想吃牛肉」）。
+Embedding 接口存在少量随机性，重跑指标会有 ±0.01 波动；当前 150 条标注中命中 149 条。
 
 ### 查询改写后的逐条复测
 
@@ -296,15 +297,15 @@ python scripts/loadtest.py --concurrency 20 --duration 10 --paths /healthy,/menu
 - 密码使用 bcrypt 加盐哈希，认证使用 JWT Bearer Token。
 - 支付接口校验订单归属，越权操作返回 403。
 - 下单金额、配送费由服务端依据数据库价格与实时距离重算，不信任客户端传值。
-- SQL 全部参数化；Agent 的订单查询工具强制按当前 `user_id` 过滤。
+- SQL 全部参数化；订单查询工具在执行前由 LangGraph 工具节点强制注入当前 `user_id`，不依赖模型自觉传参，越权查询他人工单会被拦截。
 
 ---
 
 ## 已知限制
 
-- 检索指标基于 153 道菜品、150 条标注的模拟数据，用于链路验证与回归对比；不含菜名的口语化改写仍是主要失误来源。
-- DashScope Rerank 的免费额度很紧张：`gte-rerank-v2`、`qwen3-rerank`、`qwen3-vl-rerank` 三个模型在本项目评测过程中先后耗尽（`AllocationQuota.FreeTierOnly`），需充值或关闭控制台的「仅使用免费额度」。`RETRIEVAL_MIN_SCORE=0.64`、`RETRIEVAL_REWRITE_SCORE=0.70` 按 `qwen3-vl-rerank` 的分数区间标定，换模型需重跑评测重新标定。Rerank 不可用时自动降级为融合排序、拒答判定返回「无法判断」；此时基线对比只校验向量与融合指标，不会误报回退。
-- 菜品图片只覆盖 153 道中的 12 道，无图菜品用菜名首字占位；图片已从 2048×2048 的 5~8MB PNG 压缩为 800px JPEG（每张 57~115KB，总体积约 1MB），前端按侧栏滚动容器懒加载。
+- 检索指标基于 153 道菜品、150 条标注的模拟数据，用于链路验证与回归对比；当前 Top-3 仍有 1 条未命中，标注规模偏小，指标不宜外推到线上。
+- DashScope Rerank 的免费额度很紧张：`gte-rerank-v2`、`qwen3-rerank`、`qwen3-vl-rerank` 三个模型在本项目评测过程中先后返回 `Free quota exhausted`，需充值或关闭控制台的「仅使用免费额度」。`RETRIEVAL_MIN_SCORE=0.64`、`RETRIEVAL_REWRITE_SCORE=0.70` 按 `qwen3-vl-rerank` 的分数区间标定，换模型需重跑评测重新标定。Rerank 不可用时自动降级为融合排序、拒答判定返回「无法判断」；此时基线对比只校验向量与融合指标，不会误报回退。
+- 菜品图片只覆盖 153 道中的 12 道，无图菜品用菜名首字占位；图片已从 2048×2048 的 4.7~8.7MB PNG（合计约 85MB）压缩为 800×800 JPEG（每张 57~115KB，合计约 1.1MB），前端按侧栏滚动容器懒加载。
 - 支付为模拟实现，未接入真实支付渠道；通知推送为 `BackgroundTasks` 占位逻辑。
 
 ---
@@ -313,7 +314,7 @@ python scripts/loadtest.py --concurrency 20 --duration 10 --paths /healthy,/menu
 
 ![点餐主界面](screenshots/home.png)
 
-> 登录后的主界面：左侧按菜系/属性筛选菜品，右侧是对话点餐窗口与配送地址设置。
+> 登录后的主界面：左侧按菜系/分类筛选菜品，右侧为对话点餐窗口，顶部横幅用于设置配送地址。
 
 ---
 
