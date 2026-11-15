@@ -13,7 +13,7 @@
 
 ## 简历条目（技术深度版，可选替换第三条）
 
-- 工程化与稳定性：JWT + 服务端金额重算 + 订单归属校验；Redis 分钟级限流、LLM 超时重试与 token 成本日志；MySQL 连接池 + 阻塞调用移出事件循环，压测 QPS 57.8 → 332.2（并发 20）；前端先转义再渲染 Markdown，消除 `v-html` 的 DOM XSS。
+- 工程化与稳定性：JWT + 服务端金额重算 + 订单归属校验；Redis 分钟级限流、LLM 超时重试与 token 成本日志；MySQL 连接池 + 阻塞调用移出事件循环，压测 QPS 57.8 → 332.2（并发 20，复跑 355.3 / 363.2，零错误）；前端先转义再渲染 Markdown，消除 `v-html` 的 DOM XSS。
 - 交付：Docker 多阶段构建、非 root 运行、gunicorn 多 uvicorn worker；依赖精确锁定；GitHub Actions 覆盖 pytest、前端构建与可选的真实链路评测；仓库内置检索 / 阈值 / Agent 三套可复现评测脚本。
 
 ## 技术栈（简历用一行）
@@ -40,5 +40,7 @@ Redis、MySQL、Vue 3、Element Plus、Docker、GitHub Actions
   LLM 评审 3/3 才是更可信的口径。
 - 多轮地址继承不是靠提示词「求模型记住」，而是 Redis 会话槽位 + 工具参数补齐（`_patch_delivery_calls`），
   这条可以答「你怎么保证多轮稳定性」。
+- 压测口径：单机、并发 20、持续 10 秒、每个请求带 Token，`/menu/list` 含鉴权依赖里的 DB 查询；
+  改造前的 57.8 QPS 是当时记录，复现需回滚连接池/线程池改造，面试时如实说明。
 - 本地 Rerank 平均 18.5s/条含 CPU 推理与高德超时重试，不要把它说成线上延迟。
 - 更多问答见 [interview_qa.md](./interview_qa.md)。
