@@ -8,9 +8,10 @@
 AiMenu 是一个可本地运行的全栈 AI 点餐项目：FastAPI 提供业务接口，LangGraph 编排工具调用型 Agent，
 ChromaDB + BM25 + Rerank 完成菜品检索，高德地图负责配送范围校验，Vue 3 + Element Plus 提供点餐界面。
 
-![智能点餐对话](screenshots/chat.png)
+![智能点餐对话](screenshots/chat.gif)
 
-> 真实截图：一次「有什么清淡不辣的汤推荐」的流式对话，被推荐菜品在左侧标注「推荐」徽标，可直接加购。
+> 真实录屏（未加速）：一次「有什么清淡不辣的汤推荐」的流式对话，被推荐菜品在左侧标注「推荐」徽标，可直接加购；
+> 同一场景的静态截图见 `screenshots/chat.png`。
 > 下方检索指标由 `scripts/eval_rag.py` 在 153 道菜的本地模拟语料、150 条标注上实测，可复现，不代表线上规模效果。
 
 ---
