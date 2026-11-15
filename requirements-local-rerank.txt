@@ -1,0 +1,12 @@
+# 可选依赖：启用本地 Rerank（RERANK_PROVIDER=local）时安装
+# CPU：pip install torch --index-url https://download.pytorch.org/whl/cpu
+# GPU：pip install torch --index-url https://download.pytorch.org/whl/cu124
+# 然后再执行 pip install -r requirements-local-rerank.txt
+#
+# 国内下载模型建议用 ModelScope（约 2.3GB）：
+#   pip install modelscope -i https://pypi.tuna.tsinghua.edu.cn/simple
+#   python -c "from modelscope import snapshot_download; print(snapshot_download('BAAI/bge-reranker-v2-m3'))"
+# 将输出目录填入 .env 的 LOCAL_RERANK_MODEL（也可直接写 HuggingFace 仓库名）。
+torch==2.14.1
+transformers==5.20.2
+sentence-transformers==6.3.0

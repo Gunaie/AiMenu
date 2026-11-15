@@ -38,6 +38,8 @@ def vector_db(monkeypatch):
     ]
     db.bm25 = _FakeBM25()
     db.use_rerank = False
+    # 单测不依赖 .env 中的 Rerank 后端选择
+    db.rerank_provider = "dashscope"
     monkeypatch.setattr(db, "_embedding_content", lambda query: [0.1, 0.2])
     return db
 
@@ -65,6 +67,41 @@ def test_hybrid_search_falls_back_when_rerank_fails(vector_db, monkeypatch):
         raise RuntimeError("network error")
 
     monkeypatch.setattr(dashscope.TextReRank, "call", _boom)
+
+    results = vector_db.hybrid_search("麻婆豆腐", top_k=2)
+
+    assert len(results) == 2
+    assert all(item["score"] == 0.0 for item in results)
+    assert vector_db._rerank_available is False
+
+
+def test_local_provider_uses_local_reranker(vector_db):
+    vector_db.use_rerank = True
+    vector_db._rerank_available = True
+    vector_db.rerank_provider = "local"
+
+    class _FakeLocalReranker:
+        def rerank(self, query, documents):
+            return [0.2, 0.9][:len(documents)]
+
+    vector_db._local_reranker = _FakeLocalReranker()
+
+    results = vector_db.hybrid_search("麻婆豆腐", top_k=2)
+
+    assert results[0]["content"].startswith("菜品ID:2")
+    assert [item["score"] for item in results] == [0.9, 0.2]
+
+
+def test_local_rerank_falls_back_on_error(vector_db):
+    vector_db.use_rerank = True
+    vector_db._rerank_available = True
+    vector_db.rerank_provider = "local"
+
+    class _BrokenLocalReranker:
+        def rerank(self, query, documents):
+            raise RuntimeError("model not found")
+
+    vector_db._local_reranker = _BrokenLocalReranker()
 
     results = vector_db.hybrid_search("麻婆豆腐", top_k=2)
 

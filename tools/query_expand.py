@@ -36,6 +36,21 @@ SYNONYM_RULES: Dict[Tuple[str, ...], Tuple[str, ...]] = {
 # 口语虚词：拼接到查询文本里会稀释向量语义，改写时剔除
 _FILLER_WORDS = ("那种", "这种", "一种", "一些", "那个", "这个", "有点", "比较", "稍微", "想吃点", "来点")
 
+# 重排前的意图前缀：CrossEncoder 对「想吃土豆」这类陈述句打分极低
+# （同一道菜「想吃土豆」0.01 分，「土豆」0.40 分），重排输入需还原成名词短语
+_INTENT_PREFIXES = (
+    "我想吃", "我想喝", "我想", "想吃", "想喝", "想要", "想点", "想",
+    "来一份", "来一碗", "来碗", "来点", "来几串", "来几个", "来个", "来条", "来一",
+    "点一份", "点个", "点一条", "点条", "推荐一下", "推荐", "有没有", "有什么",
+    "帮我", "给我", "麻烦", "要一份",
+)
+# 名词短语前的量词（「一条鱼」->「鱼」）
+_MEASURE_PREFIXES = (
+    "一条", "一份", "一碗", "一盘", "一杯", "一瓶", "一个", "一只", "一把", "一块", "几串", "几个",
+)
+# 网络/方言词 -> 菜单里的标准词，只在重排输入里补充，不参与向量召回
+_RERANK_SLANG = {"撸": ("烧烤", "烤串", "羊肉串")}
+
 _CN_DIGITS = {
     "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
     "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
@@ -141,3 +156,33 @@ def build_search_text(query: str) -> str:
     if not expansions:
         return cleaned
     return " ".join([cleaned] + expansions)
+
+
+def build_rerank_query(query: str) -> str:
+    """构造 CrossEncoder 的重排输入：名词短语 + 网络词的标准写法。
+
+    本地 bge-reranker 对完整陈述句（「想喝汤」「想吃土豆」）给出的分数接近 0，
+    即便候选里就是对应菜品；剥掉意图词与量词后分数才回到可用区间
+    （「想喝汤」0.03 ->「汤」0.62）。这里只改重排输入，不影响召回与返回给用户的 query。
+    """
+    text = strip_fillers(query)
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _INTENT_PREFIXES:
+            if text.startswith(prefix) and len(text) > len(prefix):
+                text = text[len(prefix):].strip()
+                changed = True
+                break
+
+    for measure in _MEASURE_PREFIXES:
+        if text.startswith(measure) and len(text) > len(measure):
+            text = text[len(measure):].strip()
+            break
+
+    extras: List[str] = []
+    for trigger, terms in _RERANK_SLANG.items():
+        if trigger in query:
+            extras.extend(term for term in terms if term not in text and term not in extras)
+
+    return " ".join([text] + extras) if extras else text

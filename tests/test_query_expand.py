@@ -7,7 +7,9 @@ import pytest
 
 from tools import chroma_tool
 from tools.chroma_tool import ChromaVectorDB, _judge_answerable
+from tools.local_reranker import format_rerank_document
 from tools.query_expand import (
+    build_rerank_query,
     build_search_text,
     expand_query,
     extract_price,
@@ -72,6 +74,37 @@ def test_build_search_text_contains_original_and_expansions():
 
     assert text.startswith("烧腊")
     assert "叉烧" in text
+
+
+@pytest.mark.parametrize("query, expected", [
+    ("想吃土豆", "土豆"),
+    ("想点一条鱼", "鱼"),
+    ("来一份和牛刺身", "和牛刺身"),
+    ("有什么清淡不辣的汤", "清淡不辣的汤"),
+    ("麻婆豆腐", "麻婆豆腐"),
+])
+def test_build_rerank_query_returns_noun_phrase(query, expected):
+    assert build_rerank_query(query) == expected
+
+
+def test_build_rerank_query_adds_slang_terms():
+    text = build_rerank_query("想撸串")
+
+    assert "烧烤" in text and "羊肉串" in text
+
+
+def test_format_rerank_document_drops_noise_fields():
+    text = format_rerank_document(
+        "菜品ID:146|菜品名称:烤羊肉串|价格:¥12.00|菜品描述:炭火烤制|分类:烧烤|辣度:中辣"
+    )
+
+    assert text.startswith("烤羊肉串：炭火烤制")
+    assert "菜品ID" not in text and "价格" not in text
+    assert "分类：烧烤" in text
+
+
+def test_format_rerank_document_keeps_plain_text():
+    assert format_rerank_document("回锅肉") == "回锅肉"
 
 
 @pytest.mark.parametrize("query, expected", [

@@ -1,0 +1,71 @@
+[
+  {
+    "id": "search-flavor",
+    "query": "有什么清淡不辣的汤推荐",
+    "expected_tools": ["search_menu"],
+    "expected_answerable": true
+  },
+  {
+    "id": "search-price",
+    "query": "四十块以内的下饭菜",
+    "expected_tools": ["search_menu"],
+    "expected_answerable": true
+  },
+  {
+    "id": "search-category",
+    "query": "推荐几个川菜",
+    "expected_tools": ["search_menu"],
+    "expected_answerable": true
+  },
+  {
+    "id": "search-vegetarian",
+    "query": "我是素食主义者，有什么推荐",
+    "expected_tools": ["search_menu"],
+    "expected_answerable": true
+  },
+  {
+    "id": "search-spicy",
+    "query": "想吃重辣的水煮鱼",
+    "expected_tools": ["search_menu"],
+    "expected_answerable": true
+  },
+  {
+    "id": "order-recent",
+    "query": "我刚才的订单怎么样了",
+    "expected_tools": ["query_order"]
+  },
+  {
+    "id": "delivery-range",
+    "query": "光谷广场能送到吗",
+    "expected_tools": ["check_delivery"]
+  },
+  {
+    "id": "delivery-fee",
+    "query": "送到光谷广场配送费多少",
+    "expected_tools": ["check_delivery"]
+  },
+  {
+    "id": "refuse-weather",
+    "query": "今天武汉天气怎么样",
+    "expected_tools": [],
+    "expect_refusal": true
+  },
+  {
+    "id": "refuse-code",
+    "query": "帮我写一段 Python 快速排序",
+    "expected_tools": [],
+    "expect_refusal": true
+  },
+  {
+    "id": "refuse-missing-dish",
+    "query": "有帝王蟹吗",
+    "expected_tools": ["search_menu"],
+    "expected_answerable": false,
+    "expect_refusal": true
+  },
+  {
+    "id": "smalltalk",
+    "query": "你是谁",
+    "expected_tools": []
+  }
+]

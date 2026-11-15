@@ -216,7 +216,12 @@ def evaluate(top_k=3, verbose=True, labels_path=LABELS_PATH,
         "query_count": len(labels),
         "corpus_size": corpus_size,
         "rerank_enabled": bool(chroma_db.use_rerank and chroma_db._rerank_available),
-        "rerank_model": os.getenv("RERANK_MODEL", "qwen3-vl-rerank"),
+        "rerank_model": (
+            os.getenv("LOCAL_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+            if os.getenv("RERANK_PROVIDER", "dashscope").strip().lower() == "local"
+            else os.getenv("RERANK_MODEL", "qwen3-vl-rerank")
+        ),
+        "rerank_provider": os.getenv("RERANK_PROVIDER", "dashscope").strip().lower(),
         "vector_only": _score(ranked["vector_only"], expectations, top_k),
         "fusion_only": _score(ranked["fusion_only"], expectations, top_k),
         "hybrid": _score(ranked["hybrid"], expectations, top_k),

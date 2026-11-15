@@ -48,8 +48,12 @@ services:
       MYSQL_PORT: 3306
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
     ports:
       - "8001:8001"
+    volumes:
+      # 向量库由 setup_db.py 写入，容器重建后仍需保留
+      - chroma_data:/app/chroma_db
     depends_on:
       db:
         condition: service_healthy
@@ -82,3 +86,4 @@ services:
 volumes:
   mysql_data:
   redis_data:
+  chroma_data:

@@ -16,6 +16,7 @@ from chromadb.config import Settings
 from http import HTTPStatus
 import logging
 from tools.query_expand import (
+    build_rerank_query,
     build_search_text,
     expand_query,
     extract_price,
@@ -40,17 +41,23 @@ class ChromaVectorDB:
         self.collection_name = "menu-item-collection"
         self.embedding_model = "text-embedding-v4"
         self.rerank_model = os.getenv("RERANK_MODEL", "qwen3-vl-rerank")  # DashScope 的重排序模型
+        # dashscope：云端 API；local：本地 bge-reranker（需安装可选依赖）
+        self.rerank_provider = os.getenv("RERANK_PROVIDER", "dashscope").strip().lower()
+        self._local_reranker = None
         self.dimension = 1536
         self.use_rerank = os.getenv("USE_RERANK", "true").lower() == "true"
         # 是否启用查询改写（同义扩展 + 预算约束解析），消融实验时可关闭
         self.use_rewrite = os.getenv("RETRIEVAL_EXPAND", "true").lower() == "true"
         self._rerank_available = True  # 记录 Rerank 是否可用
 
-        # 阈值参数（qwen3-vl-rerank 实测：正例 top1 最低 0.665，域外最高 0.619）
+        # 阈值参数：云端与本地模型分数区间不同，默认值按当前 provider 取
+        # qwen3-vl-rerank：正例 top1 最低 0.665，域外最高 0.619 -> 0.64
+        # bge-reranker-v2-m3（本地）：dev 网格搜索 0.115，域外最高分 0.088
         # rewrite_score_threshold：首轮重排置信度低于该值时启用同义扩展二次召回
         # min_relevance_score：最高相关度低于该值则判定为「无答案」，用于兜底拒答
+        default_min_score = "0.115" if self.rerank_provider == "local" else "0.64"
         self.rewrite_score_threshold = float(os.getenv("RETRIEVAL_REWRITE_SCORE", "0.70"))
-        self.min_relevance_score = float(os.getenv("RETRIEVAL_MIN_SCORE", "0.64"))
+        self.min_relevance_score = float(os.getenv("RETRIEVAL_MIN_SCORE", default_min_score))
         self.BM25_EXPANSION_WEIGHT = float(os.getenv("BM25_EXPANSION_WEIGHT", "0.5"))
 
         # 配置chroma客户端对象以及集合对象
@@ -248,6 +255,54 @@ class ChromaVectorDB:
             logger.error(f"同步数据到ChromaDB失败{e}")
             return False
 
+    def _rerank(self, query: str, candidates: List[Dict[str, Any]],
+                top_k: int) -> List[Dict[str, Any]]:
+        """按配置选择云端或本地 Rerank，失败时统一降级为融合排序"""
+        if not candidates:
+            return []
+        if not self.use_rerank or not self._rerank_available:
+            for c in candidates:
+                c.setdefault('score', 0.0)
+            return candidates[:top_k]
+        if self.rerank_provider == "local":
+            return self._rerank_local(query, candidates, top_k)
+        return self._rerank_with_dashscope(query, candidates, top_k)
+
+    def _rerank_local(self, query: str, candidates: List[Dict[str, Any]],
+                      top_k: int) -> List[Dict[str, Any]]:
+        """使用本地 CrossEncoder 重排序，分数为 sigmoid 后的 0~1 相关度"""
+        try:
+            if self._local_reranker is None:
+                from tools.local_reranker import get_local_reranker
+                self._local_reranker = get_local_reranker()
+            from tools.local_reranker import format_rerank_document
+
+            # 本地 CrossEncoder 对陈述句与原始元数据串打分偏低，重排前做归一化：
+            # query 还原为名词短语，候选转成「菜名：描述 属性：值」的自然文本
+            scores = self._local_reranker.rerank(
+                build_rerank_query(query),
+                [format_rerank_document(c['content']) for c in candidates],
+            )
+            if len(scores) != len(candidates):
+                raise ValueError(f"Rerank 分数数量不匹配: {len(scores)} != {len(candidates)}")
+
+            ranked = sorted(zip(candidates, scores), key=lambda pair: pair[1], reverse=True)[:top_k]
+            return [
+                {
+                    "id": candidate['id'],
+                    "score": float(score),
+                    "content": candidate['content'],
+                    "line_number": candidate['line_number'],
+                }
+                for candidate, score in ranked
+            ]
+        except Exception as e:
+            logger.error(f"本地 Rerank 失败: {e}，已禁用重排序并降级为融合排序")
+            self._rerank_available = False
+            for c in candidates:
+                c.setdefault('score', 0.0)
+            return candidates[:top_k]
+
     def _rerank_with_dashscope(self, query: str, candidates: List[Dict[str, Any]],
                                top_k: int) -> List[Dict[str, Any]]:
         """使用 DashScope Rerank API 进行重排序"""
@@ -426,7 +481,7 @@ class ChromaVectorDB:
 
             if self.use_rerank:
                 logger.info(f"进入重排序阶段，候选数量: {len(candidates)}")
-                results = self._rerank_with_dashscope(query, candidates, top_k)
+                results = self._rerank(query, candidates, top_k)
             else:
                 results = candidates[:top_k]
 
@@ -438,7 +493,7 @@ class ChromaVectorDB:
                 additions = [item for item in expanded_candidates if item['content'] not in known]
                 if additions:
                     logger.info(f"Rerank 置信度偏低，同义扩展补充 {len(additions)} 个候选后重排")
-                    results = self._rerank_with_dashscope(query, candidates + additions, top_k)
+                    results = self._rerank(query, candidates + additions, top_k)
             return results
         except Exception as e:
             logger.error(f"高级混合检索失败：{e}")

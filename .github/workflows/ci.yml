@@ -39,10 +39,11 @@ jobs:
       - name: Build
         run: npm run build
 
-  # 真实链路检索评测：默认不跑，配置仓库变量 RUN_RETRIEVAL_EVAL=true
+  # 真实链路评测：默认不跑，配置仓库变量 RUN_RETRIEVAL_EVAL=true
   # 或手动触发 workflow_dispatch 后才执行；需要 secret DASHSCOPE_API_KEY。
+  # 该 job 会同时跑检索评测与 Agent 端到端评测（工具选择 / 拒答话术）。
   retrieval-eval:
-    name: Retrieval eval (optional)
+    name: Retrieval & Agent eval (optional)
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' || vars.RUN_RETRIEVAL_EVAL == 'true'
     services:
@@ -90,3 +91,17 @@ jobs:
           python scripts/eval_rag.py --top-k 3 --quiet --no-ablation \
             --baseline data/eval_baseline.json \
             --json eval_result.json
+      - name: Agent end-to-end eval
+        if: always() && env.DASHSCOPE_API_KEY != ''
+        run: |
+          python scripts/eval_agent.py --min-tool-accuracy 0.8 \
+            --json agent_eval.json
+      - name: Upload eval reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-reports
+          path: |
+            eval_result.json
+            agent_eval.json
+          if-no-files-found: ignore
