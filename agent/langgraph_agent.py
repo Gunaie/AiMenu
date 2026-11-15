@@ -17,6 +17,9 @@ from agent.session_memory import RedisSessionMemory
 
 logger = logging.getLogger(__name__)
 
+# 会话级槽位名：记录本会话已确认过的配送地址，供后续「那配送费多少」这类追问复用
+DELIVERY_ADDRESS_SLOT = "delivery_address"
+
 # 定义 Agent 状态
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
@@ -118,10 +121,51 @@ class SmartRestaurantGraph:
             return messages
         return messages[:-1] + [last.model_copy(update={"tool_calls": patched})]
 
+    @staticmethod
+    def _patch_delivery_calls(messages: List[BaseMessage], fallback_address: str = None):
+        """补齐 check_delivery 的地址参数，并返回本轮出现的地址
+
+        模型在「那配送费多少」这类追问里容易漏传地址（甚至干脆不调工具）。
+        工具执行前把上一轮确认过的地址补进参数；同时把本轮明确给出的地址
+        回传给调用方，用于更新会话槽位。
+        """
+        if not messages:
+            return messages, None
+        last = messages[-1]
+        if not getattr(last, "tool_calls", None):
+            return messages, None
+        patched = []
+        seen_address = None
+        changed = False
+        for call in last.tool_calls:
+            if call.get("name") == "check_delivery":
+                args = dict(call.get("args") or {})
+                address = (args.get("address") or "").strip()
+                if address:
+                    seen_address = address
+                elif fallback_address:
+                    args["address"] = fallback_address
+                    changed = True
+                call = {**call, "args": args}
+            patched.append(call)
+        if changed:
+            messages = messages[:-1] + [last.model_copy(update={"tool_calls": patched})]
+        return messages, seen_address
+
     async def _run_tools(self, state: AgentState, config: RunnableConfig):
-        """工具节点：执行前补齐当前用户身份"""
+        """工具节点：补齐当前用户身份与上一轮已确认的配送地址"""
         user_info = state.get("user_info") or {}
-        messages = self._inject_user_id(state["messages"], user_info.get("id"))
+        user_id = user_info.get("id")
+        session_id = (config or {}).get("configurable", {}).get("thread_id")
+        fallback_address = self.memory_store.get_slot(
+            session_id, DELIVERY_ADDRESS_SLOT, user_id=user_id
+        )
+
+        messages, address = self._patch_delivery_calls(state["messages"], fallback_address)
+        messages = self._inject_user_id(messages, user_id)
+        if address:
+            # 本轮明确说了地点，更新槽位；下一轮追问直接复用
+            self.memory_store.set_slot(session_id, DELIVERY_ADDRESS_SLOT, address, user_id=user_id)
         # 必须透传 config：LangGraph 新版会校验节点运行所需的 config key，
         # 不传会直接抛 "Missing required config key"。
         return await self.tool_node.ainvoke({"messages": messages}, config=config)
@@ -137,20 +181,36 @@ class SmartRestaurantGraph:
         if user_info:
             user_context = f"\n当前登录客官信息：\n- 昵称：{user_info.get('nickname')}\n- 用户ID：{user_info.get('id')}\n请在回复中优先使用昵称称呼客官，并表现出对老顾客的亲切感。"
 
+        # 本会话已确认过的配送地址：追问配送费/时效时可直接复用，不必再问一遍
+        session_id = (config or {}).get("configurable", {}).get("thread_id")
+        known_address = self.memory_store.get_slot(
+            session_id, DELIVERY_ADDRESS_SLOT, user_id=(user_info or {}).get("id")
+        )
+        address_slot = ""
+        if known_address:
+            address_slot = (
+                f"\n【本会话已知配送地址】：{known_address}"
+                f"\n客官本轮未给出新地点时，追问配送费、送达时长或能否送达，"
+                f"请直接以这个地址调用 check_delivery，不要重复询问地址。"
+            )
+
         # 系统提示词：定义角色和行为规范
         system_prompt = f"""你是一个亲切专业的智能餐厅助手（小二）。
 任务：利用提供的【工具】获取信息，并以热情、地道的口吻回答客官的问题。
-{user_context}
+{user_context}{address_slot}
 
 准则：
 1. **角色定位**：自称“小二”，称呼用户为“客官”。语气亲切，适当使用“好嘞”、“客官您慢看”等表达。
 2. **工具使用优先级（极其重要）**：
    - **查订单状态/进度/我的单子**：必须调用 `query_order`。调用时系统会自动处理权限，你只需在需要时传入 user_id 参数（如果已知）。
-   - **查配送范围/能否送达**：仅当客官询问“能否送到某地”或“配送费多少”且明确提到了一个【地点】时，才调用 `check_delivery`。
+   - **查配送范围/配送费/送达时长**：客官给出明确地点时调用 `check_delivery(address=地点)`；
+     如果客官本轮只追问配送费或时效、且【本会话已知配送地址】存在，直接用该地址调用 `check_delivery`，
+     不要再让客官重复提供地址。
    - **寻找菜品/推荐/口味**：使用 `search_menu`。
 3. **意图区分示例**：
    - 用户：“我刚才的订单怎么样了” -> **调用 `query_order()`**。
    - 用户：“光谷地铁站能送到吗” -> **调用 `check_delivery(address='光谷地铁站')`**。
+   - 用户（上一轮已问过光谷地铁站）：“那配送费多少” -> **直接用已知地址调用 `check_delivery`**，不要反问地址。
 4. **多轮对话**：承接上文，不重复啰嗦。
 5. **菜品高亮**：当你向客官推荐或提到具体菜品时，请务必直接说出【参考数据】中的完整菜名。
 6. **逻辑闭环**：如果获取到的数据为空或失败，如实告知客官并提供备选建议。

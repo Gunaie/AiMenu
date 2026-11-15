@@ -7,7 +7,7 @@ import json
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from agent.langgraph_agent import SmartRestaurantGraph
+from agent.langgraph_agent import DELIVERY_ADDRESS_SLOT, SmartRestaurantGraph
 from agent.tools import query_order
 
 
@@ -171,3 +171,77 @@ async def test_run_tools_passes_config_and_injects_user(graph):
     payload, received_config = fake.calls[0]
     assert received_config is config
     assert payload["messages"][-1].tool_calls[0]["args"]["user_id"] == 9
+
+
+def test_patch_delivery_calls_fills_missing_address(graph):
+    message = AIMessage(
+        content="",
+        tool_calls=[{"name": "check_delivery", "args": {"address": ""}, "id": "call_d"}],
+    )
+
+    patched, address = graph._patch_delivery_calls([message], "光谷广场")
+
+    assert patched[-1].tool_calls[0]["args"]["address"] == "光谷广场"
+    # 补齐的是历史地址，不算本轮新给出的地点
+    assert address is None
+
+
+def test_patch_delivery_calls_keeps_explicit_address(graph):
+    message = AIMessage(
+        content="",
+        tool_calls=[{"name": "check_delivery", "args": {"address": "武昌火车站"}, "id": "call_d"}],
+    )
+
+    patched, address = graph._patch_delivery_calls([message], "光谷广场")
+
+    assert patched == [message]
+    assert address == "武昌火车站"
+
+
+def test_patch_delivery_calls_ignores_other_tools(graph):
+    message = AIMessage(
+        content="",
+        tool_calls=[{"name": "search_menu", "args": {"query": "川菜"}, "id": "call_s"}],
+    )
+
+    patched, address = graph._patch_delivery_calls([message], "光谷广场")
+
+    assert patched == [message]
+    assert address is None
+
+
+class _FakeMemorySlots:
+    """替身：只用字典记录槽位，不依赖 Redis"""
+
+    def __init__(self):
+        self.slots = {}
+
+    def get_slot(self, session_id, name, user_id=None):
+        return self.slots.get((session_id, name, user_id))
+
+    def set_slot(self, session_id, name, value, user_id=None):
+        self.slots[(session_id, name, user_id)] = value
+
+
+@pytest.mark.asyncio
+async def test_run_tools_saves_then_reuses_delivery_address(graph):
+    """第一轮确认的地点写入槽位，第二轮追问漏传地址时自动复用"""
+    fake = _FakeToolNode()
+    graph.tool_node = fake
+    graph.memory_store = _FakeMemorySlots()
+    config = {"configurable": {"thread_id": "t1"}}
+
+    first = AIMessage(
+        content="",
+        tool_calls=[{"name": "check_delivery", "args": {"address": "光谷广场"}, "id": "call_1"}],
+    )
+    await graph._run_tools({"messages": [first], "user_info": {"id": 9}}, config)
+    assert graph.memory_store.slots[("t1", DELIVERY_ADDRESS_SLOT, 9)] == "光谷广场"
+
+    second = AIMessage(
+        content="",
+        tool_calls=[{"name": "check_delivery", "args": {}, "id": "call_2"}],
+    )
+    await graph._run_tools({"messages": [second], "user_info": {"id": 9}}, config)
+
+    assert fake.calls[-1][0]["messages"][-1].tool_calls[0]["args"]["address"] == "光谷广场"

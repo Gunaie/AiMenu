@@ -18,6 +18,7 @@ from tools.redis_tool import cache
 logger = logging.getLogger(__name__)
 
 KEY_PREFIX = "aimenu:agent:history:"
+SLOT_PREFIX = "aimenu:agent:slot:"
 
 
 class RedisSessionMemory:
@@ -65,3 +66,20 @@ class RedisSessionMemory:
     def clear(self, session_id: str, user_id: int = None) -> None:
         """清空指定会话历史（供“重新开始”之类操作使用）"""
         cache.delete(self._key(session_id, user_id))
+
+    @staticmethod
+    def _slot_key(session_id: str, name: str, user_id: int = None) -> str:
+        owner = str(user_id) if user_id is not None else "anonymous"
+        return f"{SLOT_PREFIX}{owner}:{session_id}:{name}"
+
+    def get_slot(self, session_id: str, name: str, user_id: int = None):
+        """读取会话级槽位（如上一轮确认过的配送地址）"""
+        if not session_id:
+            return None
+        return cache.get(self._slot_key(session_id, name, user_id))
+
+    def set_slot(self, session_id: str, name: str, value, user_id: int = None) -> None:
+        """写入会话级槽位，TTL 与会话历史保持一致"""
+        if not session_id or value in (None, ""):
+            return
+        cache.set(self._slot_key(session_id, name, user_id), value, expire=self.ttl)

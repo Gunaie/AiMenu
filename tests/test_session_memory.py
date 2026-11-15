@@ -84,3 +84,23 @@ def test_clear_removes_session(memory):
     store.clear("s1")
 
     assert store.load("s1") == []
+
+
+def test_slot_roundtrip_is_isolated_by_user(memory):
+    store, fake = memory
+
+    store.set_slot("s1", "delivery_address", "光谷广场", user_id=1)
+
+    assert store.get_slot("s1", "delivery_address", user_id=1) == "光谷广场"
+    # 不同用户即便 session_id 相同，也读不到别人的槽位
+    assert store.get_slot("s1", "delivery_address", user_id=2) is None
+    assert fake.expires["aimenu:agent:slot:1:s1:delivery_address"] == 600
+
+
+def test_set_slot_ignores_empty_value(memory):
+    store, fake = memory
+
+    store.set_slot("s1", "delivery_address", "")
+
+    assert store.get_slot("s1", "delivery_address") is None
+    assert fake.store == {}
