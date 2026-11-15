@@ -39,16 +39,16 @@ class ChromaVectorDB:
         # 配置集合名字、嵌入模型名字、嵌入模型的维度
         self.collection_name = "menu-item-collection"
         self.embedding_model = "text-embedding-v4"
-        self.rerank_model = os.getenv("RERANK_MODEL", "gte-rerank-v2")  # DashScope 的重排序模型
+        self.rerank_model = os.getenv("RERANK_MODEL", "qwen3-rerank")  # DashScope 的重排序模型
         self.dimension = 1536
         self.use_rerank = os.getenv("USE_RERANK", "true").lower() == "true"
         self._rerank_available = True  # 记录 Rerank 是否可用
 
-        # 阈值参数（gte-rerank-v2 分数区间实测约 0.006~1.0）
+        # 阈值参数（qwen3-rerank 实测：正例 top1 最低 0.42，域外最高 0.39）
         # rewrite_score_threshold：首轮重排置信度低于该值时启用同义扩展二次召回
         # min_relevance_score：最高相关度低于该值则判定为「无答案」，用于兜底拒答
-        self.rewrite_score_threshold = float(os.getenv("RETRIEVAL_REWRITE_SCORE", "0.20"))
-        self.min_relevance_score = float(os.getenv("RETRIEVAL_MIN_SCORE", "0.13"))
+        self.rewrite_score_threshold = float(os.getenv("RETRIEVAL_REWRITE_SCORE", "0.55"))
+        self.min_relevance_score = float(os.getenv("RETRIEVAL_MIN_SCORE", "0.40"))
         self.BM25_EXPANSION_WEIGHT = float(os.getenv("BM25_EXPANSION_WEIGHT", "0.5"))
 
         # 配置chroma客户端对象以及集合对象

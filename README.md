@@ -22,7 +22,7 @@ ChromaDB + BM25 + Rerank 完成菜品检索，高德地图负责配送范围校�
 
 - **工具调用型 Agent**：基于 LangGraph 构建「决策 → 调用工具 → 生成回复」循环，接入菜单检索、配送校验、订单查询三类工具，支持 SSE 流式输出与多轮上下文。
 - **会话记忆持久化**：多轮历史写入 Redis（按 `session_id` 分键、滑动 TTL），服务重启或换实例后仍能续上上下文，不再依赖进程内 `MemorySaver`。
-- **混合检索**：向量召回（text-embedding-v4）+ BM25 关键词召回，RRF 合并去重后由 DashScope Rerank 精排；Rerank 不可用时自动降级为融合结果。
+- **混合检索**：向量召回（text-embedding-v4）+ BM25 关键词召回，RRF 合并去重后由 DashScope qwen3-rerank 精排；Rerank 不可用时自动降级为融合结果。
 - **口语化查询改写**：无菜名、偏口语的 query（"广式烧腊里的甜口猪肉"）先做同义扩展兜底召回；"四十块以内"这类预算约束会解析成价格区间并过滤候选。
 - **无答案拒答**：以 Rerank 最高分为相关度信号，低于阈值时返回 `answerable=false`，Agent 如实告知"没有这道菜"而不是硬推不相关菜品；阈值在标注集与域外问题上实测选定。
 - **配送范围校验**：高德地址补全、地理编码与路径规划，按距离计算阶梯配送费并拦截超范围下单。
@@ -65,7 +65,7 @@ flowchart LR
 | 层次 | 技术 |
 | --- | --- |
 | 后端 | FastAPI、Uvicorn、Pydantic |
-| AI | LangGraph、LangChain、Qwen-Plus（DashScope）、text-embedding-v4、gte-rerank |
+| AI | LangGraph、LangChain、Qwen-Plus（DashScope）、text-embedding-v4、qwen3-rerank |
 | 检索 | ChromaDB、rank_bm25、jieba |
 | 存储 | MySQL 8、Redis 7 |
 | 前端 | Vue 3、Element Plus、Pinia、Vite |
@@ -192,9 +192,9 @@ RUN_INTEGRATION=1 pytest tests/test_retrieval.py -s
 
 | 检索策略 | Recall@3 | MRR |
 | --- | --- | --- |
-| 纯向量检索 | 0.9733 | 0.9456 |
-| 向量 + BM25 融合（RRF） | 0.9600 | 0.9333 |
-| 向量 + BM25 + Rerank | **0.9800** | **0.9600** |
+| 纯向量检索 | 0.9667 | 0.9389 |
+| 向量 + BM25 融合（RRF） | 0.9533 | 0.9278 |
+| 向量 + BM25 + Rerank（qwen3-rerank） | **1.0000** | **0.9867** |
 
 数据来源：`data/menu_items.json`（菜品）、`data/eval_labels.json`（标注，含 40 条菜名直查、
 40 条口语化改写、50 条属性组合、20 条菜系/分类查询）。Embedding 接口存在少量随机性，
@@ -206,13 +206,11 @@ RUN_INTEGRATION=1 pytest tests/test_retrieval.py -s
 | --- | --- | --- |
 | 那种红亮亮的甜口红烧肉 | Top-3 未命中 | 东坡肉 命中 Top-1 |
 | 广式烧腊里的甜口猪肉 | Top-3 未命中 | 蜜汁叉烧 命中 Top-1 |
-| 四十块以内的下饭菜 | Top-3 未命中 | 鱼香茄子 命中 Top-1（预算过滤生效） |
-| 融合链路全量（`USE_RERANK=false`） | 0.9600 / 0.9333 | 0.9600 / 0.9344 |
+| 四十块以内的下饭菜 | Top-3 未命中 | 青椒肉丝 命中 Top-1（预算过滤生效） |
+| 融合链路全量（`USE_RERANK=false`） | 0.9600 / 0.9333 | 0.9533 / 0.9278 |
 
-说明：复测期间 DashScope Rerank 免费额度耗尽（接口返回 free quota exhausted），
-因此没有再给出改进后的全量混合检索整体数字，只记录可复现的融合链路指标与逐条结果；
-额度恢复后重跑 `python scripts/eval_rag.py` 即可得到新的整体指标。检索代码在 Rerank
-不可用时会自动降级为融合排序，并把拒答判定置为「无法判断」，不会误拒正常 query。
+说明：上表前三行为 `qwen3-rerank` 可用时的逐条复测结果；最后一行是关闭 Rerank 的融合链路指标，
+Embedding 接口存在随机性，不同批次会在 ±0.01 内波动。
 
 ### 无答案拒答（阈值实测）
 
@@ -220,20 +218,23 @@ RUN_INTEGRATION=1 pytest tests/test_retrieval.py -s
 
 | 分布 | 标注问题 top1 分数 | 域外问题 top1 分数 |
 | --- | --- | --- |
-| 最低 | 0.1334 | 0.0060 |
-| 中位数 | 0.2762 | 0.0061 |
-| 最高 | — | 0.1530 |
+| 最低 | 0.4217 | 0.1576 |
+| 中位数 | 0.8051 | 0.2665 |
+| 最高 | — | 0.3892 |
 
-取 `RETRIEVAL_MIN_SCORE=0.13`：**标注问题 150/150 判为可回答（无误拒），域外问题 17/18 被拒答**；
-唯一漏网是「有没有无糖可乐」被「可乐鸡翅」以 0.153 分召回，属于同词根误判。
+取 `RETRIEVAL_MIN_SCORE=0.40`：**标注问题 150/150 判为可回答（0 误拒），域外问题 18/18 全部被拒答**。
+阈值通过对 0.30~0.80 的网格扫描选定（0.40 是同时满足「零误拒」与「全拒答」的最低点，
+再往上到 0.44 就开始误拒正常 query）。换用其他 Rerank 模型时分数区间会整体平移，
+必须重跑评测重新标定，不能沿用这组数值。
 
 ### 相关环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
+| RERANK_MODEL | qwen3-rerank | 重排序模型（gte-rerank 已下线；gte-rerank-v2 免费额度易耗尽，可切回） |
 | USE_RERANK | true | 关闭后只做向量 + BM25 融合 |
-| RETRIEVAL_REWRITE_SCORE | 0.20 | 首轮 Rerank 最高分低于该值时启用同义扩展兜底召回 |
-| RETRIEVAL_MIN_SCORE | 0.13 | 低于该值判定「菜单无法回答」（返回 `answerable=false`） |
+| RETRIEVAL_REWRITE_SCORE | 0.55 | 首轮 Rerank 最高分低于该值时启用同义扩展兜底召回 |
+| RETRIEVAL_MIN_SCORE | 0.40 | 低于该值判定「菜单无法回答」（返回 `answerable=false`） |
 | BM25_EXPANSION_WEIGHT | 0.5 | 扩展词的 BM25 分数权重 |
 | MYSQL_POOL_SIZE | 10 | MySQL 连接池大小 |
 | AGENT_MEMORY_TTL / AGENT_MEMORY_TURNS | 86400 / 6 | 会话记忆过期时间（秒）与保留轮数 |
@@ -279,7 +280,7 @@ python scripts/loadtest.py --concurrency 20 --duration 10 --paths /healthy,/menu
 ## 已知限制
 
 - 检索指标基于 153 道菜品、150 条标注的模拟数据，用于链路验证与回归对比；不含菜名的口语化改写仍是主要失误来源。
-- DashScope Rerank 使用免费额度，额度耗尽后自动降级为融合排序，此时的拒答判定为「无法判断」而不是误判。
+- DashScope Rerank 依赖免费额度：`gte-rerank-v2` 额度耗尽后已切到 `qwen3-rerank`，`RETRIEVAL_MIN_SCORE=0.40` 与 `RETRIEVAL_REWRITE_SCORE=0.55` 都按 `qwen3-rerank` 的分数区间标定；换模型需重跑 `scripts/eval_rag.py` 重新标定。Rerank 完全不可用时自动降级为融合排序，拒答判定返回「无法判断」而不是误判。
 - 菜品图片只覆盖部分菜品，无图菜品用菜名首字占位；原图体积偏大（数 MB 级 PNG），尚未做压缩与 CDN。
 - 支付为模拟实现，未接入真实支付渠道；通知推送为 `BackgroundTasks` 占位逻辑。
 
