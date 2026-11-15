@@ -1,0 +1,215 @@
+{
+  "summary": {
+    "case_count": 12,
+    "tool_accuracy": 1.0,
+    "answerable_accuracy": 1.0,
+    "refusal_accuracy": 0.6667,
+    "avg_latency_ms": 25542.1
+  },
+  "details": [
+    {
+      "id": "search-flavor",
+      "query": "有什么清淡不辣的汤推荐",
+      "expected_tools": [
+        "search_menu"
+      ],
+      "actual_tools": [
+        "search_menu"
+      ],
+      "tool_match": true,
+      "expected_answerable": true,
+      "answerable_flags": [
+        true
+      ],
+      "answerable_ok": true,
+      "refusal_ok": null,
+      "answer": "客官您慢看，小二为您找到了几款清淡不辣的汤品，都很适合喜欢清爽口味的您：\n\n1. **紫菜蛋花汤** (¥16.00)：经典家常味，紫菜与蛋花在清汤中舒展，撒上香油，清淡鲜美，是配餐的绝佳选择。\n2. **丝瓜蛋汤** (¥20.00)：汤清味鲜，丝瓜煮软后口感滑嫩，夏天喝特别清爽解暑。\n3. **冬瓜排骨汤** (¥38.00)：小火慢炖而成，汤清味鲜，冬瓜软糯入味，清热又滋补。\n4. **玉米排骨汤** (¥40.00)：甜玉米与排骨慢炖，汤头清甜不油腻，玉米吸满了肉香，喝起来很满足。\n5. **菌菇汤** (¥32.00)：汇集了香菇、口蘑、杏鲍菇的鲜味，汤清味浓，虽然是素食但鲜味十足。\n\n客官想尝尝哪一款呢？或者需要小二帮您看看配送范围吗？",
+      "latency_ms": 100461.0
+    },
+    {
+      "id": "search-price",
+      "query": "四十块以内的下饭菜",
+      "expected_tools": [
+        "search_menu"
+      ],
+      "actual_tools": [
+        "search_menu"
+      ],
+      "tool_match": true,
+      "expected_answerable": true,
+      "answerable_flags": [
+        true
+      ],
+      "answerable_ok": true,
+      "refusal_ok": null,
+      "answer": "客官您慢看，小二为您挑了几道四十块以内、绝对“米饭杀手”的好菜：\n\n1.  **青椒肉丝**（¥32.00）：猪里脊切得细细的，配上清香的青椒快炒，肉丝滑嫩，咸鲜微辣，是咱们店最经典的下饭菜之一。\n2.  **鱼香茄子**（¥32.00）：茄子烧得软糯入味，吸饱了咸甜酸辣的鱼香汁，一口下去满嘴留香，特别费米饭！\n3.  **湘西外婆菜**（¥32.00）：腌制过的外婆菜配上肉末和青椒，咸香微辣，越嚼越有滋味，是小二私藏的下饭神器。\n4.  **蚂蚁上树**（¥32.00）：红薯粉条吸足了肉末的酱汁，形似蚂蚁爬树，口感丰富，超级下饭。\n5.  **鱼香肉丝**（¥36.00）：经典的川菜代表，虽然没鱼但有鱼香味，肉丝滑嫩配上脆爽的笋丝，酸甜微辣，让人欲罢不能。\n\n这几道菜都在您的预算内，客官想翻哪道的牌子呢？",
+      "latency_ms": 51362.7
+    },
+    {
+      "id": "search-category",
+      "query": "推荐几个川菜",
+      "expected_tools": [
+        "search_menu"
+      ],
+      "actual_tools": [
+        "search_menu"
+      ],
+      "tool_match": true,
+      "expected_answerable": true,
+      "answerable_flags": [
+        true
+      ],
+      "answerable_ok": true,
+      "refusal_ok": null,
+      "answer": "客官您慢看，这几道可是咱们店的川菜精华：\n\n1.  **【水煮鱼】**：这可是咱们的招牌大菜！草鱼片滑嫩无比，配上红油汤底和花椒，麻辣厚重，吃起来那叫一个过瘾，适合喜欢重口味的客官。\n2.  **【麻婆豆腐】**：川菜里的名片级菜品。豆腐嫩滑入味，集麻、辣、烫、香、酥、嫩、鲜七味于一体，拌饭吃简直一绝。\n3.  **【宫保鸡丁】**：经典中的经典，鸡丁滑嫩，花生米酥脆，口味酸甜微辣，层次分明，不吃辣的客官也能接受哦。\n4.  **【鱼香肉丝】**：虽然名字里有鱼，但其实没有鱼哦~ 它是经典的鱼香味，咸甜酸辣兼具，肉丝滑嫩，笋丝脆爽，非常开胃。\n5.  **【鱼香茄子】**：茄子软糯吸汁，也是下饭神器，咸甜酸辣俱全，家常又美味。\n\n客官您看想尝尝哪一道？或者需要小二帮您看看配送范围吗？",
+      "latency_ms": 11883.9
+    },
+    {
+      "id": "search-vegetarian",
+      "query": "我是素食主义者，有什么推荐",
+      "expected_tools": [
+        "search_menu"
+      ],
+      "actual_tools": [
+        "search_menu"
+      ],
+      "tool_match": true,
+      "expected_answerable": true,
+      "answerable_flags": [
+        true
+      ],
+      "answerable_ok": true,
+      "refusal_ok": null,
+      "answer": "评测客官，小二为您挑出了几道非常不错的素食菜品，您慢看：\n\n1.  **【菌菇汤】**：这道菜可是素菜里的“鲜味担当”！用香菇、口蘑、杏鲍菇一起慢煮，汤清味浓，喝一口满嘴都是自然的鲜香，而且完全不辣，非常养生。\n2.  **【手撕包菜】**：喜欢口感脆嫩的客官千万别错过！大火爆炒出来的包菜锅气十足，带着一点点干辣椒的微辣和蒜香，特别下饭。\n3.  **【凉拌木耳】**：如果您想开胃解腻，这道酸辣脆爽的凉菜最合适不过了。黑木耳搭配小米椒和香菜，低脂又健康。\n4.  **【豆浆】**：餐后或者早餐来一杯热乎乎的豆浆，豆香浓郁，暖胃又舒服。\n\n小二特意帮您排除了【鲫鱼豆腐汤】，虽然它有豆腐，但含有鲫鱼，不符合您的素食要求哦。\n\n客官您看看对哪道菜感兴趣？或者想尝尝其他口味的素菜，随时吩咐小二！",
+      "latency_ms": 14681.6
+    },
+    {
+      "id": "search-spicy",
+      "query": "想吃重辣的水煮鱼",
+      "expected_tools": [
+        "search_menu"
+      ],
+      "actual_tools": [
+        "search_menu"
+      ],
+      "tool_match": true,
+      "expected_answerable": true,
+      "answerable_flags": [
+        true
+      ],
+      "answerable_ok": true,
+      "refusal_ok": null,
+      "answer": "客官您慢看，小二给您找到了几道非常符合您口味的重辣鱼肴：\n\n首推咱们的招牌 **【水煮鱼】**！这道菜可是川菜馆的扛把子，草鱼片滑嫩无比，红油汤底麻辣厚重，配上豆芽垫底，一口下去麻辣鲜香直冲天灵盖，绝对够劲！价格也很实惠，只要 ¥78.00。\n\n如果您想换个口味，还可以试试：\n*   **【双椒鱼头】**：湘菜经典，一半红剁椒一半青剁椒，鲜辣层次感更强，¥92.00。\n*   **【剁椒鱼头】**：同样是重辣过瘾的湘菜代表，肉质细嫩，鲜辣十足，¥88.00。\n\n客官，您看是来一份 **【水煮鱼】** 过过瘾，还是尝尝鱼头的鲜辣呢？",
+      "latency_ms": 30856.7
+    },
+    {
+      "id": "order-recent",
+      "query": "我刚才的订单怎么样了",
+      "expected_tools": [
+        "query_order"
+      ],
+      "actual_tools": [
+        "query_order"
+      ],
+      "tool_match": true,
+      "expected_answerable": null,
+      "answerable_flags": [],
+      "answerable_ok": null,
+      "refusal_ok": null,
+      "answer": "客官，您的订单 **ORD17947292986349** 已经支付成功啦！\n\n后厨的大师傅正在紧锣密鼓地为您烹饪 **番茄牛腩汤** 和 **上汤娃娃菜** 呢，火候正旺，请您稍候片刻~ \n\n这单总共是 ¥86.5，会配送到武汉工程大学那边。美食马上就到，客官您准备好碗筷了吗？😋",
+      "latency_ms": 5010.2
+    },
+    {
+      "id": "delivery-range",
+      "query": "光谷广场能送到吗",
+      "expected_tools": [
+        "check_delivery"
+      ],
+      "actual_tools": [
+        "check_delivery"
+      ],
+      "tool_match": true,
+      "expected_answerable": null,
+      "answerable_flags": [],
+      "answerable_ok": null,
+      "refusal_ok": null,
+      "answer": "客官您放心，**光谷广场**在咱们的配送范围内呢！\n\n📍 **配送详情：**\n*   **配送地址：** 湖北省武汉市洪山区光谷广场(地铁站)\n*   **配送距离：** 5.40公里\n*   **预计配送费：** ￥7.8\n\n您可以放心下单啦！要是想看看有什么好吃的，随时招呼小二一声~ 😊",
+      "latency_ms": 44064.3
+    },
+    {
+      "id": "delivery-fee",
+      "query": "送到光谷广场配送费多少",
+      "expected_tools": [
+        "check_delivery"
+      ],
+      "actual_tools": [
+        "check_delivery"
+      ],
+      "tool_match": true,
+      "expected_answerable": null,
+      "answerable_flags": [],
+      "answerable_ok": null,
+      "refusal_ok": null,
+      "answer": "客官您好！小二帮您查到了：\n\n送到【光谷广场】是在咱们的配送范围内的哦！\n📍 **配送距离**：5.40公里\n💰 **配送费**：7.8元\n\n您看需要加点什么好吃的吗？小店有不少招牌菜等着您品尝呢！",
+      "latency_ms": 5391.2
+    },
+    {
+      "id": "refuse-weather",
+      "query": "今天武汉天气怎么样",
+      "expected_tools": [],
+      "actual_tools": [],
+      "tool_match": true,
+      "expected_answerable": null,
+      "answerable_flags": [],
+      "answerable_ok": null,
+      "refusal_ok": true,
+      "answer": "客官您好呀，小二这边主要负责咱们餐厅的菜品推荐、订单查询和配送范围确认呢。\n\n关于武汉今天的天气情况，小二暂时无法提供哦。不过，如果您想看看今天适合吃点什么暖胃或者清爽的菜品，或者想查查之前的订单状态，随时吩咐小二，我一定为您效劳！😄",
+      "latency_ms": 2535.3
+    },
+    {
+      "id": "refuse-code",
+      "query": "帮我写一段 Python 快速排序",
+      "expected_tools": [],
+      "actual_tools": [],
+      "tool_match": true,
+      "expected_answerable": null,
+      "answerable_flags": [],
+      "answerable_ok": null,
+      "refusal_ok": false,
+      "answer": "客官您好呀，小二是个餐厅助手，主要负责帮您查查菜品、看看订单或者确认下配送范围呢。\n\n写代码这事儿，小二实在是不太在行，怕给您帮了倒忙。不过，如果您肚子饿了，想看看咱们店里有啥好吃的【招牌菜】，或者想查查之前的订单状态，小二随时为您效劳！\n\n您要不要先看看菜单？😋",
+      "latency_ms": 2735.8
+    },
+    {
+      "id": "refuse-missing-dish",
+      "query": "有帝王蟹吗",
+      "expected_tools": [
+        "search_menu"
+      ],
+      "actual_tools": [
+        "search_menu"
+      ],
+      "tool_match": true,
+      "expected_answerable": false,
+      "answerable_flags": [
+        false
+      ],
+      "answerable_ok": true,
+      "refusal_ok": true,
+      "answer": "哎呀，客官，实在抱歉，咱们小店暂时没有**帝王蟹**这道菜呢。\n\n不过，如果您喜欢海鲜类的硬菜，小二给您推荐几款咱们店的招牌：\n\n1.  **【佛跳墙】**：这可是闽菜之王，汇集了鲍鱼、海参、花胶等名贵食材，汤浓味厚，滋补又美味！\n2.  **【葱烧海参】**：海参软糯弹牙，葱香浓郁，口感非常棒。\n3.  **【潮汕砂锅粥】**：里面加了鲜虾和蟹，鲜甜浓稠，特别适合想喝点热乎鲜汤的时候。\n\n客官您看看这几道合不合您的胃口？或者您想尝尝别的口味，随时吩咐小二哈！",
+      "latency_ms": 34724.0
+    },
+    {
+      "id": "smalltalk",
+      "query": "你是谁",
+      "expected_tools": [],
+      "actual_tools": [],
+      "tool_match": true,
+      "expected_answerable": null,
+      "answerable_flags": [],
+      "answerable_ok": null,
+      "refusal_ok": null,
+      "answer": "客官您好呀！小二我是咱们餐厅的智能助手，专门为您服务的。\n\n不管是想看看有什么好吃的【招牌菜】，查查订单送到哪儿了，还是问问能不能送到您家，找小二准没错！客官今天想点些什么，或者有什么需要小二帮忙的吗？😄",
+      "latency_ms": 2798.4
+    }
+  ]
+}
