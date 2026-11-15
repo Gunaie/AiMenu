@@ -6,10 +6,12 @@
 """
 import os
 import logging
+import threading
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 import mysql.connector
+from mysql.connector import pooling
 import json
 from datetime import datetime
 from dotenv import load_dotenv
@@ -18,6 +20,38 @@ from tools.redis_tool import cache
 
 # 以 .env 为准：避免系统中残留的旧配置覆盖项目配置
 load_dotenv(override=True)
+
+# 连接池：每个请求都新建 TCP 连接在并发下开销明显，这里复用固定大小的连接池
+_connection_pool: Optional[pooling.MySQLConnectionPool] = None
+_pool_lock = threading.Lock()
+
+
+def _mysql_config() -> Dict[str, Any]:
+    """读取 MySQL 连接配置（连接池与直连共用）"""
+    return {
+        "host": os.getenv("MYSQL_HOST", "localhost"),
+        "port": os.getenv("MYSQL_PORT", "3306"),
+        "user": os.getenv("MYSQL_USER_NAME", "root"),
+        "password": os.getenv("MYSQL_USER_PASSWORD", "root"),
+        "database": os.getenv("MYSQL_DB_NAME", "menu"),
+        "charset": "utf8mb4",
+    }
+
+
+def _get_connection_pool() -> pooling.MySQLConnectionPool:
+    """惰性创建全局连接池（首次调用时按环境变量初始化）"""
+    global _connection_pool
+    if _connection_pool is None:
+        with _pool_lock:
+            if _connection_pool is None:
+                _connection_pool = pooling.MySQLConnectionPool(
+                    pool_name="aimenu_pool",
+                    pool_size=int(os.getenv("MYSQL_POOL_SIZE", "10")),
+                    pool_reset_session=True,
+                    **_mysql_config(),
+                )
+                logger.info("MySQL 连接池初始化完成")
+    return _connection_pool
 
 
 class DataBaseConnection:
@@ -34,15 +68,13 @@ class DataBaseConnection:
         self.cursor = None
 
     def initialize_connection(self) -> bool:
-        """初始化数据库连接对象和游标对象"""
+        """从连接池获取连接与游标对象（池耗尽时回退为直连）"""
         try:
-            self.connection = mysql.connector.connect(
-                host=self.host,
-                port=self.port,
-                user=self.user,
-                password=self.password,
-                database=self.db_name,
-                charset="utf8mb4")
+            try:
+                self.connection = _get_connection_pool().get_connection()
+            except (pooling.PoolError, mysql.connector.Error) as pool_error:
+                logger.warning(f"连接池不可用，回退为直连: {pool_error}")
+                self.connection = mysql.connector.connect(**_mysql_config())
             self.cursor = self.connection.cursor(dictionary=True)
             return True
         except mysql.connector.Error as e:
@@ -50,7 +82,7 @@ class DataBaseConnection:
             return False
 
     def disconnect_connection(self) -> bool:
-        """关闭数据库资源"""
+        """关闭数据库资源（池化连接由 close() 归还连接池）"""
         try:
             if self.cursor:
                 self.cursor.close()

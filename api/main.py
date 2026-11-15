@@ -7,6 +7,7 @@
 2.3 GET /menu/list - 菜品列表接口
 """
 from  fastapi import  FastAPI, HTTPException, BackgroundTasks, Depends, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from typing import List,Optional, Dict, Any
@@ -25,7 +26,10 @@ logger = logging.getLogger(__name__)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
-    """获取当前登录用户的依赖项 (强制登录)"""
+    """获取当前登录用户的依赖项 (强制登录)
+
+    这里刻意保持 async：真正的数据库查询放到线程池执行，避免阻塞事件循环。
+    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="登录已过期，请重新登录",
@@ -37,7 +41,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     username: str = payload.get("sub")
     if username is None:
         raise credentials_exception
-    user = get_user_by_username(username)
+    user = await run_in_threadpool(get_user_by_username, username)
     if user is None:
         raise credentials_exception
     return user
@@ -51,7 +55,7 @@ async def get_optional_user(token: str = Depends(oauth2_scheme)) -> Optional[dic
         username: str = payload.get("sub")
         if username is None:
             return None
-        return get_user_by_username(username)
+        return await run_in_threadpool(get_user_by_username, username)
     except Exception as exc:
         logger.debug(f"可选登录态解析失败: {exc}")
         return None
@@ -198,29 +202,37 @@ class Token(BaseModel):
     username: str
     nickname: str
 
+def _authenticate(username: str, password: str) -> Optional[dict]:
+    """账号密码校验（bcrypt 校验是 CPU 密集操作，放到线程池执行）"""
+    user = get_user_by_username(username)
+    if not user or not verify_password(password, user['password_hash']):
+        return None
+    return user
+
+
 @app.post("/auth/register", response_model=ActionResponse)
 async def register(user_in: UserRegister):
     """用户注册"""
-    existing_user = get_user_by_username(user_in.username)
+    existing_user = await run_in_threadpool(get_user_by_username, user_in.username)
     if existing_user:
         return ActionResponse(success=False, message="用户名已存在")
     
     user_data = {
         "username": user_in.username,
-        "password_hash": get_password_hash(user_in.password),
+        "password_hash": await run_in_threadpool(get_password_hash, user_in.password),
         "nickname": user_in.nickname or user_in.username,
         "phone": user_in.phone
     }
     
-    if create_user(user_data):
+    if await run_in_threadpool(create_user, user_data):
         return ActionResponse(success=True, message="注册成功，请登录")
     return ActionResponse(success=False, message="注册失败，请稍后再试")
 
 @app.post("/auth/login", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     """用户登录"""
-    user = get_user_by_username(form_data.username)
-    if not user or not verify_password(form_data.password, user['password_hash']):
+    user = await run_in_threadpool(_authenticate, form_data.username, form_data.password)
+    if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="用户名或密码错误",
@@ -248,8 +260,8 @@ async def get_me(current_user: dict = Depends(get_current_user)):
 # ====================== 业务逻辑接口 ======================
 
 @app.get("/delivery/tips")
-async def delivery_tips_endpoint(keywords: str, current_user: dict = Depends(get_current_user)):
-    """获取地址输入建议 (需要登录)"""
+def delivery_tips_endpoint(keywords: str, current_user: dict = Depends(get_current_user)):
+    """获取地址输入建议 (需要登录)；同步 HTTP 调用，交给 FastAPI 线程池执行"""
     from tools.amap_tool import get_input_tips
     return get_input_tips(keywords)
 
@@ -319,8 +331,8 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: dict = Depend
 
 
 @app.get("/menu/list", response_model=MenuListResponse)
-async def menu_list_endpoint(current_user: dict = Depends(get_current_user)):
-    """菜品列表区域展示 (需要登录)"""
+def menu_list_endpoint(current_user: dict = Depends(get_current_user)):
+    """菜品列表区域展示 (需要登录)；DB/缓存为同步调用，交给线程池执行"""
 
     # 1.调用service
     from  service.diancan_service import get_menu
@@ -347,9 +359,9 @@ async def menu_list_endpoint(current_user: dict = Depends(get_current_user)):
 
 
 @app.post("/delivery", response_model=DeliveryResponse)
-async def delivery_endpoint(request: DeliveryRequest, current_user: dict = Depends(get_current_user)):
+def delivery_endpoint(request: DeliveryRequest, current_user: dict = Depends(get_current_user)):
     """
-    配送查询接口 (需要登录)
+    配送查询接口 (需要登录)；高德接口为同步 requests 调用，交给线程池执行
     """
 
     # 1.导入service
@@ -394,12 +406,12 @@ async def delivery_endpoint(request: DeliveryRequest, current_user: dict = Depen
 
 
 @app.post("/order/submit", response_model=ActionResponse)
-async def order_submit_endpoint(
+def order_submit_endpoint(
     request: OrderSubmitRequest, 
     background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user)
 ):
-    """提交订单接口 (需要登录)"""
+    """提交订单接口 (需要登录)；DB 与高德调用均为同步，交给线程池执行"""
     from service.diancan_service import submit_order
     order_data = request.model_dump()
     order_data['user_id'] = current_user['id']  # 绑定当前用户
@@ -414,7 +426,7 @@ async def order_submit_endpoint(
 
 
 @app.post("/order/pay/{order_no}", response_model=ActionResponse)
-async def order_pay_endpoint(order_no: str, current_user: dict = Depends(get_current_user)):
+def order_pay_endpoint(order_no: str, current_user: dict = Depends(get_current_user)):
     """模拟支付接口 (需要登录，且只能支付自己的订单)"""
     from service.diancan_service import pay_order
     result = pay_order(order_no, user_id=current_user['id'])
@@ -424,7 +436,7 @@ async def order_pay_endpoint(order_no: str, current_user: dict = Depends(get_cur
 
 
 @app.get("/order/list")
-async def order_list_endpoint(limit: int = 10, current_user: dict = Depends(get_current_user)):
+def order_list_endpoint(limit: int = 10, current_user: dict = Depends(get_current_user)):
     """获取当前用户的订单历史列表"""
     from tools.db_tool import get_all_orders
     orders = get_all_orders(user_id=current_user['id'], limit=limit)

@@ -8,12 +8,12 @@ from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 # 导入自定义工具
 from agent.tools import restaurant_tools
+from agent.session_memory import RedisSessionMemory
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +51,9 @@ class SmartRestaurantGraph:
         
         # 构建图
         self.workflow = self._create_workflow()
-        self.memory = MemorySaver()
-        self.app = self.workflow.compile(checkpointer=self.memory)
+        # 会话历史持久化到 Redis：服务重启或多实例部署后仍能续上上下文
+        self.memory_store = RedisSessionMemory()
+        self.app = self.workflow.compile()
 
     def _create_workflow(self):
         graph = StateGraph(AgentState)
@@ -116,6 +117,7 @@ class SmartRestaurantGraph:
 4. **多轮对话**：承接上文，不重复啰嗦。
 5. **菜品高亮**：当你向客官推荐或提到具体菜品时，请务必直接说出【参考数据】中的完整菜名。
 6. **逻辑闭环**：如果获取到的数据为空或失败，如实告知客官并提供备选建议。
+7. **无答案拒答**：`search_menu` 返回 `answerable: false` 时，说明菜单中没有相关菜品（例如客官问帝王蟹、松露），必须如实说明"小店暂时没有这道菜"，可推荐相近菜品，绝不能编造菜品或硬推不相关的结果。
 """
         
         # 针对 Tool Calling 注入 user_id
@@ -161,13 +163,16 @@ class SmartRestaurantGraph:
     async def astream_run(self, user_query: str, session_id: str = "default", user_info: Dict[str, Any] = None):
         """异步流式运行"""
         config = {"configurable": {"thread_id": session_id}}
-        
+
+        # 先取出该会话的持久化历史，再拼上本轮提问
+        history = self.memory_store.load(session_id)
         initial_state = {
-            "messages": [HumanMessage(content=user_query)],
+            "messages": history + [HumanMessage(content=user_query)],
             "user_info": user_info
         }
         
-        logger.info(f"LangGraph (Tool-Calling) astream_run start: {user_query} (user: {user_info.get('username') if user_info else 'Guest'})")
+        logger.info(f"LangGraph (Tool-Calling) astream_run start: {user_query} (user: {user_info.get('username') if user_info else 'Guest'}, history: {len(history)})")
+        answer_parts: List[str] = []
         
         try:
             async for event in self.app.astream_events(
@@ -185,7 +190,7 @@ class SmartRestaurantGraph:
                     if chunk and not getattr(chunk, 'tool_calls', None):
                         content = getattr(chunk, 'content', '')
                         if content:
-                            has_sent_content = True
+                            answer_parts.append(content)
                             yield {"type": "content", "content": content}
                 
                 # 2. 处理元数据 (菜品 ID)
@@ -204,13 +209,17 @@ class SmartRestaurantGraph:
         except Exception as e:
             logger.error(f"LangGraph astream_run error: {e}")
             yield {"type": "error", "content": f"小二忙不过来了，请客官稍后再试。(错误详情: {str(e)})"}
+        else:
+            # 只有完整跑完的轮次才写入记忆，避免把半截回复固化
+            self.memory_store.append_turn(session_id, user_query, "".join(answer_parts))
 
     async def run(self, user_query: str, session_id: str = "default", user_info: Dict[str, Any] = None):
         """同步运行流程"""
         config = {"configurable": {"thread_id": session_id}}
-        
+
+        history = self.memory_store.load(session_id)
         initial_state = {
-            "messages": [HumanMessage(content=user_query)],
+            "messages": history + [HumanMessage(content=user_query)],
             "user_info": user_info
         }
         
@@ -219,8 +228,10 @@ class SmartRestaurantGraph:
             config=config
         )
         
+        response = final_state.get("final_response", "客官久等了，小二没能听清您的需求。")
+        self.memory_store.append_turn(session_id, user_query, response)
         return {
-            "response": final_state.get("final_response", "客官久等了，小二没能听清您的需求。"),
+            "response": response,
             "menu_ids": final_state.get("menu_ids", [])
         }
 

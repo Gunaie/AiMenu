@@ -20,7 +20,10 @@ def search_menu(query: str) -> Dict[str, Any]:
         return {
             "success": True,
             "contents": result.get("contents", []),
-            "menu_ids": result.get("ids", [])
+            "menu_ids": result.get("ids", []),
+            # answerable=False 表示菜单里没有足够相关的菜品，模型应如实拒答而非硬推
+            "answerable": result.get("answerable"),
+            "top_score": result.get("top_score"),
         }
     except Exception as e:
         logger.error(f"search_menu tool error: {e}")

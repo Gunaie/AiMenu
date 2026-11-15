@@ -10,11 +10,18 @@ import dashscope
 import jieba
 from rank_bm25 import BM25Okapi
 from dotenv import load_dotenv
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import chromadb
 from chromadb.config import Settings
 from http import HTTPStatus
 import logging
+from tools.query_expand import (
+    build_search_text,
+    expand_query,
+    extract_price,
+    parse_price_constraint,
+    strip_fillers,
+)
 
 # 以 .env 为准：避免系统中残留的旧 Key 覆盖项目配置
 load_dotenv(override=True)
@@ -36,6 +43,13 @@ class ChromaVectorDB:
         self.dimension = 1536
         self.use_rerank = os.getenv("USE_RERANK", "true").lower() == "true"
         self._rerank_available = True  # 记录 Rerank 是否可用
+
+        # 阈值参数（gte-rerank-v2 分数区间实测约 0.006~1.0）
+        # rewrite_score_threshold：首轮重排置信度低于该值时启用同义扩展二次召回
+        # min_relevance_score：最高相关度低于该值则判定为「无答案」，用于兜底拒答
+        self.rewrite_score_threshold = float(os.getenv("RETRIEVAL_REWRITE_SCORE", "0.20"))
+        self.min_relevance_score = float(os.getenv("RETRIEVAL_MIN_SCORE", "0.13"))
+        self.BM25_EXPANSION_WEIGHT = float(os.getenv("BM25_EXPANSION_WEIGHT", "0.5"))
 
         # 配置chroma客户端对象以及集合对象
         self.client = None
@@ -232,7 +246,8 @@ class ChromaVectorDB:
             logger.error(f"同步数据到ChromaDB失败{e}")
             return False
 
-    def _rerank_with_dashscope(self, query: str, candidates: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+    def _rerank_with_dashscope(self, query: str, candidates: List[Dict[str, Any]],
+                               top_k: int) -> List[Dict[str, Any]]:
         """使用 DashScope Rerank API 进行重排序"""
         try:
             if not candidates:
@@ -268,11 +283,13 @@ class ChromaVectorDB:
                     })
                 return reranked_results
             else:
+                # 额度耗尽/权限不足等失败都会让返回分数全为 0，此时必须停用重排序，
+                # 否则「无答案拒答」会把正常 query 误判为不可回答
                 if "Access denied" in resp.message:
                     logger.warning(f"Rerank API 访问被拒绝，已禁用重排序功能。请检查阿里云 DashScope 控制台是否开通了 {self.rerank_model} 服务。")
-                    self._rerank_available = False
                 else:
-                    logger.warning(f"Rerank API 调用失败: {resp.message}，使用原始排序")
+                    logger.warning(f"Rerank API 调用失败: {resp.message}，已禁用重排序并降级为融合排序")
+                self._rerank_available = False
                 
                 # 补充默认得分以防报错
                 for c in candidates:
@@ -287,69 +304,140 @@ class ChromaVectorDB:
                     c['score'] = 0.0
             return candidates[:top_k]
 
+    @staticmethod
+    def _fuse_candidates(
+        vector_candidates: List[Dict[str, Any]],
+        bm25_candidates: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """RRF 融合两路召回结果，按内容去重"""
+        candidates: Dict[str, Dict[str, Any]] = {}
+        fusion_scores: Dict[str, float] = {}
+        for source_candidates in (vector_candidates, bm25_candidates):
+            for rank, candidate in enumerate(source_candidates, 1):
+                content = candidate['content']
+                candidates.setdefault(content, candidate)
+                fusion_scores[content] = fusion_scores.get(content, 0.0) + 1.0 / (60 + rank)
+        return sorted(
+            candidates.values(),
+            key=lambda c: fusion_scores[c['content']],
+            reverse=True,
+        )
+
+    @staticmethod
+    def _filter_by_price(candidates: List[Dict[str, Any]],
+                         price_range: Tuple[float, float]) -> List[Dict[str, Any]]:
+        """按预算区间过滤候选菜品；全部被过滤时退回原始候选，避免无结果"""
+        lower, upper = price_range
+        filtered = []
+        for candidate in candidates:
+            price = extract_price(candidate.get('content', ''))
+            if price is not None and lower <= price <= upper:
+                filtered.append(candidate)
+        if not filtered:
+            logger.info(f"预算区间 {price_range} 未命中任何菜品，已退回未过滤候选")
+            return candidates
+        return filtered
+
+    def _collect_candidates(self, query: str, expand: bool = False,
+                            price_range: Optional[Tuple[float, float]] = None) -> List[Dict[str, Any]]:
+        """向量 + BM25 双路召回并做 RRF 融合
+
+        expand=True 时用同义扩展后的文本做向量召回，并按 0.5 权重叠加扩展词的 BM25 分数，
+        用于口语化 query 的兜底召回。
+        """
+        # 1. 向量搜索（带预算约束时扩大候选池，避免过滤后数量不足）
+        search_text = build_search_text(query) if expand else strip_fillers(query)
+        query_vector = self._embedding_content(search_text)
+        vector_candidates = []
+        if query_vector:
+            vector_results = self.collection.query(
+                query_embeddings=[query_vector],
+                n_results=30 if price_range else 10,
+                include=["metadatas", "distances"]
+            )
+            if vector_results['ids'] and vector_results['ids'][0]:
+                for i in range(len(vector_results['ids'][0])):
+                    metadata = vector_results['metadatas'][0][i]
+                    vector_candidates.append({
+                        "id": vector_results['ids'][0][i],
+                        "content": metadata['content'],
+                        "line_number": metadata['line_number'],
+                        "source": "vector"
+                    })
+
+        # 2. BM25 搜索 (Top 10 候选)
+        bm25_candidates = []
+        if self.bm25:
+            tokenized_query = list(jieba.cut(strip_fillers(query)))
+            scores = list(self.bm25.get_scores(tokenized_query))
+            if expand:
+                extra_terms = expand_query(query)
+                if extra_terms:
+                    extra_scores = self.bm25.get_scores(list(jieba.cut(" ".join(extra_terms))))
+                    scores = [
+                        base + self.BM25_EXPANSION_WEIGHT * extra
+                        for base, extra in zip(scores, extra_scores)
+                    ]
+            # 获取前 10 个得分最高的索引
+            top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:10]
+            for idx in top_indices:
+                if scores[idx] > 0:
+                    metadata = self.corpus_metadatas[idx]
+                    bm25_candidates.append({
+                        "id": str(metadata['line_number']),
+                        "content": self.corpus[idx],
+                        "line_number": metadata['line_number'],
+                        "source": "bm25"
+                    })
+
+        # 3. 合并去重 + RRF 融合排序
+        candidates = self._fuse_candidates(vector_candidates, bm25_candidates)
+
+        # 4. 预算约束过滤
+        if price_range:
+            candidates = self._filter_by_price(candidates, price_range)
+        return candidates
+
+    def _should_rewrite(self, results: List[Dict[str, Any]]) -> bool:
+        """Rerank 置信度偏低时，才用同义扩展做二次召回"""
+        if not (self.use_rerank and self._rerank_available and results):
+            return False
+        top_score = max((item.get("score", 0.0) for item in results), default=0.0)
+        return top_score < self.rewrite_score_threshold
+
     def hybrid_search(self, query: str, top_k: int = 2) -> List[Dict[str, Any]]:
-        """高级混合检索：向量检索 + BM25关键词检索 + Rerank重排序"""
+        """高级混合检索：向量检索 + BM25关键词检索 + Rerank重排序
+
+        改写策略：
+        - 命中预算约束（"四十块以内"）时先按价格过滤候选；
+        - 首轮 Rerank 置信度低于阈值时，用同义扩展再做一次召回，合并候选池后重排；
+        - Rerank 始终以用户原始 query 为准，改写只用于扩大召回。
+        """
         try:
             if not self.collection and not self.initialize_connection():
                 return []
 
-            # 1. 向量搜索 (Top 10 候选)
-            query_vector = self._embedding_content(query)
-            vector_candidates = []
-            if query_vector:
-                vector_results = self.collection.query(
-                    query_embeddings=[query_vector],
-                    n_results=10,
-                    include=["metadatas", "distances"]
+            price_range = parse_price_constraint(query)
+            candidates = self._collect_candidates(query, price_range=price_range)
+            if not candidates:
+                return []
+
+            if self.use_rerank:
+                logger.info(f"进入重排序阶段，候选数量: {len(candidates)}")
+                results = self._rerank_with_dashscope(query, candidates, top_k)
+            else:
+                results = candidates[:top_k]
+
+            if self._should_rewrite(results) and expand_query(query):
+                expanded_candidates = self._collect_candidates(
+                    query, expand=True, price_range=price_range
                 )
-                if vector_results['ids'] and vector_results['ids'][0]:
-                    for i in range(len(vector_results['ids'][0])):
-                        metadata = vector_results['metadatas'][0][i]
-                        vector_candidates.append({
-                            "id": vector_results['ids'][0][i],
-                            "content": metadata['content'],
-                            "line_number": metadata['line_number'],
-                            "source": "vector"
-                        })
-
-            # 2. BM25 搜索 (Top 10 候选)
-            bm25_candidates = []
-            if self.bm25:
-                tokenized_query = list(jieba.cut(query))
-                scores = self.bm25.get_scores(tokenized_query)
-                # 获取前 10 个得分最高的索引
-                top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:10]
-                for idx in top_indices:
-                    if scores[idx] > 0:
-                        metadata = self.corpus_metadatas[idx]
-                        bm25_candidates.append({
-                            "id": str(metadata['line_number']),
-                            "content": self.corpus[idx],
-                            "line_number": metadata['line_number'],
-                            "source": "bm25"
-                        })
-
-            # 3. 合并去重 + RRF 融合排序（Rerank 不可用时按此顺序降级返回）
-            candidates: Dict[str, Dict[str, Any]] = {}
-            fusion_scores: Dict[str, float] = {}
-            for source_candidates in (vector_candidates, bm25_candidates):
-                for rank, candidate in enumerate(source_candidates, 1):
-                    content = candidate['content']
-                    candidates.setdefault(content, candidate)
-                    fusion_scores[content] = fusion_scores.get(content, 0.0) + 1.0 / (60 + rank)
-
-            all_candidates = sorted(
-                candidates.values(),
-                key=lambda c: fusion_scores[c['content']],
-                reverse=True,
-            )
-
-            # 4. Rerank 重排序 (取前 top_k)
-            if all_candidates:
-                logger.info(f"进入重排序阶段，候选数量: {len(all_candidates)}")
-                return self._rerank_with_dashscope(query, all_candidates, top_k)
-            
-            return []
+                known = {item['content'] for item in candidates}
+                additions = [item for item in expanded_candidates if item['content'] not in known]
+                if additions:
+                    logger.info(f"Rerank 置信度偏低，同义扩展补充 {len(additions)} 个候选后重排")
+                    results = self._rerank_with_dashscope(query, candidates + additions, top_k)
+            return results
         except Exception as e:
             logger.error(f"高级混合检索失败：{e}")
             return []
@@ -365,10 +453,29 @@ def search_menu_items(query: str, top_k: int = 2) -> List[str]:
     match_result = chroma_db.hybrid_search(query, top_k=top_k)
     return [item['content'] for item in match_result]
 
+
+def _judge_answerable(scores: List[float]) -> Optional[bool]:
+    """根据 Rerank 最高分判断菜单能否回答该问题
+
+    返回 None 表示无法判断（Rerank 未启用/不可用），调用方应按可回答处理。
+    """
+    if not (chroma_db.use_rerank and chroma_db._rerank_available):
+        return None
+    if not scores:
+        return False
+    return max(scores) >= chroma_db.min_relevance_score
+
+
 def search_menu_items_with_ids(query: str, top_k: int = 2) -> Dict[str, Any]:
     match_result = chroma_db.hybrid_search(query=query, top_k=top_k)
     if not match_result:
-        return {"contents": [], "ids": [], "scores": []}
+        return {
+            "contents": [],
+            "ids": [],
+            "scores": [],
+            "answerable": _judge_answerable([]),
+            "top_score": 0.0,
+        }
 
     ids = []
     import re
@@ -378,10 +485,13 @@ def search_menu_items_with_ids(query: str, top_k: int = 2) -> Dict[str, Any]:
         dish_id = re_match.group(1) if re_match else item['id']
         ids.append(dish_id)
 
+    scores = [item.get('score', 0.0) for item in match_result]
     return {
         "contents": [item['content'] for item in match_result],
         "ids": ids,
-        "scores": [item['score'] for item in match_result]
+        "scores": scores,
+        "answerable": _judge_answerable(scores),
+        "top_score": round(max(scores), 4) if scores else 0.0,
     }
 
 if __name__ == "__main__":

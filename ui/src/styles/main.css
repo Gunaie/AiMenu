@@ -199,6 +199,14 @@ body {
   font-size: 12px;
 }
 
+/* 无成品图的菜品：用菜名首字做占位，避免出现破图 */
+.image-slot-fallback {
+  background: linear-gradient(135deg, #fff1e6 0%, #ffe3cc 100%);
+  color: #d46b08;
+  font-size: 34px;
+  font-weight: 600;
+}
+
 .menu-card-header, .dish-desc, .dish-tags, .menu-card-footer {
   padding: 0 15px;
 }

@@ -56,6 +56,9 @@
               <template #placeholder>
                 <div class="image-slot">加载中...</div>
               </template>
+              <template #error>
+                <div class="image-slot image-slot-fallback">{{ item.dish_name.slice(0, 1) }}</div>
+              </template>
             </el-image>
           </div>
           <div class="menu-card-header">
