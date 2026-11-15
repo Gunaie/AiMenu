@@ -21,6 +21,7 @@ dist/
 
 # Project specific
 chroma_db/
+eval_result.json
 trae-sandbox/
 trae-preview/
 logs/
