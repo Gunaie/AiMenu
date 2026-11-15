@@ -19,7 +19,8 @@ import os
 from dotenv import load_dotenv
 from tools.redis_tool import cache
 
-load_dotenv()
+# 以 .env 为准：避免系统中残留的旧 Key 覆盖项目配置
+load_dotenv(override=True)
 
 # Python对数据处理有两种方式的验证
 # 1.静态检查：（程序员以及编译器） 并且不会在运行的时候做约束：类型约束  typing

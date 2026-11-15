@@ -5,7 +5,8 @@ from jose import JWTError, jwt
 import bcrypt
 from dotenv import load_dotenv
 
-load_dotenv()
+# 以 .env 为准：避免系统中残留的旧 Key 覆盖项目配置
+load_dotenv(override=True)
 
 # JWT 配置
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "aimenu_secret_key_2024_trae")

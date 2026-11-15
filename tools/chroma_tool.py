@@ -16,7 +16,8 @@ from chromadb.config import Settings
 from http import HTTPStatus
 import logging
 
-load_dotenv()
+# 以 .env 为准：避免系统中残留的旧 Key 覆盖项目配置
+load_dotenv(override=True)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ class ChromaVectorDB:
         # 配置集合名字、嵌入模型名字、嵌入模型的维度
         self.collection_name = "menu-item-collection"
         self.embedding_model = "text-embedding-v4"
-        self.rerank_model = "gte-rerank" # DashScope 的重排序模型
+        self.rerank_model = os.getenv("RERANK_MODEL", "gte-rerank-v2")  # DashScope 的重排序模型
         self.dimension = 1536
         self.use_rerank = os.getenv("USE_RERANK", "true").lower() == "true"
         self._rerank_available = True  # 记录 Rerank 是否可用

@@ -5,7 +5,8 @@ import logging
 from tools.db_tool import DataBaseConnection
 from tools.chroma_tool import chroma_db
 
-load_dotenv()
+# 以 .env 为准：避免系统中残留的旧配置覆盖项目配置
+load_dotenv(override=True)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

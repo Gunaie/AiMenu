@@ -5,7 +5,8 @@ from typing import Optional, Any
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# 以 .env 为准：避免系统中残留的旧配置覆盖项目配置
+load_dotenv(override=True)
 
 # 日志配置
 logger = logging.getLogger(__name__)

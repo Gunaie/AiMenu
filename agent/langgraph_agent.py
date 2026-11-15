@@ -31,12 +31,19 @@ class SmartRestaurantGraph:
         self.api_base = os.getenv("DASHSCOPE_API_BASE", "https://dashscope.aliyuncs.com/compatible-mode/v1/")
         
         # 核心 LLM
+        # qwen3 系列默认开启思考模式，点餐场景不需要推理过程，且会拖慢流式首字响应
+        extra_body = {}
+        if "qwen3" in self.model_name.lower():
+            enable_thinking = os.getenv("DASHSCOPE_ENABLE_THINKING", "false").lower() == "true"
+            extra_body["enable_thinking"] = enable_thinking
+
         self.llm = ChatOpenAI(
             api_key=self.dashscope_api_key,
             model=self.model_name,
             base_url=self.api_base,
             temperature=0.7,
-            streaming=True
+            streaming=True,
+            extra_body=extra_body or None
         )
         
         # 绑定工具到 LLM
