@@ -52,6 +52,7 @@
               :src="item.image_url || menu.getDishImageUrl(item.dish_name)"
               fit="cover"
               lazy
+              scroll-container=".menu-list-container"
             >
               <template #placeholder>
                 <div class="image-slot">加载中...</div>

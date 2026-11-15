@@ -22,7 +22,7 @@ ChromaDB + BM25 + Rerank 完成菜品检索，高德地图负责配送范围校�
 
 - **工具调用型 Agent**：基于 LangGraph 构建「决策 → 调用工具 → 生成回复」循环，接入菜单检索、配送校验、订单查询三类工具，支持 SSE 流式输出与多轮上下文。
 - **会话记忆持久化**：多轮历史写入 Redis（按 `session_id` 分键、滑动 TTL），服务重启或换实例后仍能续上上下文，不再依赖进程内 `MemorySaver`。
-- **混合检索**：向量召回（text-embedding-v4）+ BM25 关键词召回，RRF 合并去重后由 DashScope qwen3-rerank 精排；Rerank 不可用时自动降级为融合结果。
+- **混合检索**：向量召回（text-embedding-v4）+ BM25 关键词召回，RRF 合并去重后由 DashScope qwen3-vl-rerank 精排；Rerank 不可用时自动降级为融合结果。
 - **口语化查询改写**：无菜名、偏口语的 query（"广式烧腊里的甜口猪肉"）先做同义扩展兜底召回；"四十块以内"这类预算约束会解析成价格区间并过滤候选。
 - **无答案拒答**：以 Rerank 最高分为相关度信号，低于阈值时返回 `answerable=false`，Agent 如实告知"没有这道菜"而不是硬推不相关菜品；阈值在标注集与域外问题上实测选定。
 - **配送范围校验**：高德地址补全、地理编码与路径规划，按距离计算阶梯配送费并拦截超范围下单。
@@ -65,7 +65,7 @@ flowchart LR
 | 层次 | 技术 |
 | --- | --- |
 | 后端 | FastAPI、Uvicorn、Pydantic |
-| AI | LangGraph、LangChain、Qwen-Plus（DashScope）、text-embedding-v4、qwen3-rerank |
+| AI | LangGraph、LangChain、Qwen-Plus（DashScope）、text-embedding-v4、qwen3-vl-rerank |
 | 检索 | ChromaDB、rank_bm25、jieba |
 | 存储 | MySQL 8、Redis 7 |
 | 前端 | Vue 3、Element Plus、Pinia、Vite |
@@ -179,9 +179,17 @@ USE_RERANK=false python scripts/eval_rag.py --top-k 3 --no-refusal
 # 接口压测（需后端已启动）
 python scripts/loadtest.py --concurrency 20 --duration 10 --paths /healthy,/menu/list
 
+# 与基线对比：任一核心指标低于基线超过 0.02 时以退出码 3 失败
+python scripts/eval_rag.py --top-k 3 --quiet --no-ablation --baseline data/eval_baseline.json
+
 # 将检索评测接入 pytest（可选）
 RUN_INTEGRATION=1 pytest tests/test_retrieval.py -s
 ```
+
+`data/eval_baseline.json` 记录了当前语料与 `qwen3-vl-rerank` 下的指标基线，用于防止检索效果悄悄回退。
+CI 中的 `retrieval-eval` job 默认不运行（真实评测会消耗 Embedding / Rerank 额度）：
+配置仓库变量 `RUN_RETRIEVAL_EVAL=true` 与 secret `DASHSCOPE_API_KEY` 后自动启用，
+也可以在 Actions 页面手动触发（`workflow_dispatch`）。
 
 `data/eval_labels.json` 内置 150 条「query → 期望菜品」标注，覆盖 153 道菜品的全部条目，
 分别统计纯向量检索、向量 + BM25 融合（RRF）、混合检索（+Rerank）的 Recall@K 和 MRR；
@@ -192,9 +200,9 @@ RUN_INTEGRATION=1 pytest tests/test_retrieval.py -s
 
 | 检索策略 | Recall@3 | MRR |
 | --- | --- | --- |
-| 纯向量检索 | 0.9667 | 0.9389 |
-| 向量 + BM25 融合（RRF） | 0.9533 | 0.9278 |
-| 向量 + BM25 + Rerank（qwen3-rerank） | **1.0000** | **0.9867** |
+| 纯向量检索 | 0.9733 | 0.9456 |
+| 向量 + BM25 融合（RRF） | 0.9600 | 0.9344 |
+| 向量 + BM25 + Rerank（qwen3-vl-rerank） | **0.9933** | **0.9789** |
 
 数据来源：`data/menu_items.json`（菜品）、`data/eval_labels.json`（标注，含 40 条菜名直查、
 40 条口语化改写、50 条属性组合、20 条菜系/分类查询）。Embedding 接口存在少量随机性，
@@ -202,15 +210,29 @@ RUN_INTEGRATION=1 pytest tests/test_retrieval.py -s
 
 ### 查询改写后的逐条复测
 
-| 样本 | 改造前 | 改造后 |
+| 样本 | 改造前 | 当前（qwen3-vl-rerank） |
 | --- | --- | --- |
-| 那种红亮亮的甜口红烧肉 | Top-3 未命中 | 东坡肉 命中 Top-1 |
-| 广式烧腊里的甜口猪肉 | Top-3 未命中 | 蜜汁叉烧 命中 Top-1 |
-| 四十块以内的下饭菜 | Top-3 未命中 | 青椒肉丝 命中 Top-1（预算过滤生效） |
-| 融合链路全量（`USE_RERANK=false`） | 0.9600 / 0.9333 | 0.9533 / 0.9278 |
+| 那种红亮亮的甜口红烧肉 | Top-3 未命中 | 东坡肉 Top-1 |
+| 广式烧腊里的甜口猪肉 | Top-3 未命中 | 蜜汁叉烧 Top-1 |
+| 四十块以内的下饭菜 | Top-3 未命中 | 青椒肉丝 Top-1 |
 
-说明：上表前三行为 `qwen3-rerank` 可用时的逐条复测结果；最后一行是关闭 Rerank 的融合链路指标，
-Embedding 接口存在随机性，不同批次会在 ±0.01 内波动。
+### 改写消融（有无改写 × 有无 Rerank）
+
+固定同一批 150 条标注，只切换 `RETRIEVAL_EXPAND` 与 `USE_RERANK`。下表中两组 Rerank 数据在
+`qwen3-rerank` 批次测得（该模型额度耗尽后无法在 `qwen3-vl-rerank` 上重跑；补齐需恢复额度后重跑本节），
+向量与融合两组不受 Rerank 影响，与上表一致：
+
+| 配置 | Recall@3 | MRR |
+| --- | --- | --- |
+| 纯向量 | 0.9733 | 0.9456 |
+| 向量 + BM25 融合 | 0.9600 | 0.9344 |
+| + Rerank（不开改写，qwen3-rerank） | **1.0000** | **0.9900** |
+| + Rerank + 改写（qwen3-rerank） | **1.0000** | 0.9867 |
+
+结论：`qwen3-rerank` 已能把这批样本全部召回到 Top-3，改写的 Recall 增益为 0，
+MRR 低 0.0033（约 1 条样本的位次变化，量级与 Embedding 随机波动相当）。因此改写当前主要作为
+**低置信兜底**（Rerank 不可用或换用弱模型时）和**预算约束的正确性保障**（避免把超预算菜品推给用户），
+而不是召回提升项；该结论只在当前语料与模型组合下成立，换模型后应重跑本消融。
 
 ### 无答案拒答（阈值实测）
 
@@ -218,23 +240,24 @@ Embedding 接口存在随机性，不同批次会在 ±0.01 内波动。
 
 | 分布 | 标注问题 top1 分数 | 域外问题 top1 分数 |
 | --- | --- | --- |
-| 最低 | 0.4217 | 0.1576 |
-| 中位数 | 0.8051 | 0.2665 |
-| 最高 | — | 0.3892 |
+| 最低 | 0.6650 | 0.2253 |
+| 中位数 | 0.8662 | 0.4380 |
+| 最高 | 0.9568 | 0.6186 |
 
-取 `RETRIEVAL_MIN_SCORE=0.40`：**标注问题 150/150 判为可回答（0 误拒），域外问题 18/18 全部被拒答**。
-阈值通过对 0.30~0.80 的网格扫描选定（0.40 是同时满足「零误拒」与「全拒答」的最低点，
-再往上到 0.44 就开始误拒正常 query）。换用其他 Rerank 模型时分数区间会整体平移，
+取 `RETRIEVAL_MIN_SCORE=0.64`：**标注问题 150/150 判为可回答（0 误拒），域外问题 18/18 全部被拒答**。
+阈值取「正例最低分 0.6650」与「域外最高分 0.6186」的间隔中点，并在 0.40~0.72 上做过网格扫描验证：
+0.62~0.65 区间均能零误拒且全拒答，0.68 起开始误拒正常 query。换用其他 Rerank 模型时分数区间会整体平移，
 必须重跑评测重新标定，不能沿用这组数值。
 
 ### 相关环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| RERANK_MODEL | qwen3-rerank | 重排序模型（gte-rerank 已下线；gte-rerank-v2 免费额度易耗尽，可切回） |
+| RERANK_MODEL | qwen3-vl-rerank | 重排序模型（gte-rerank 已下线；gte-rerank-v2 / qwen3-rerank 免费额度已耗尽） |
 | USE_RERANK | true | 关闭后只做向量 + BM25 融合 |
-| RETRIEVAL_REWRITE_SCORE | 0.55 | 首轮 Rerank 最高分低于该值时启用同义扩展兜底召回 |
-| RETRIEVAL_MIN_SCORE | 0.40 | 低于该值判定「菜单无法回答」（返回 `answerable=false`） |
+| RETRIEVAL_EXPAND | true | 是否启用查询改写（同义扩展 + 预算解析），设为 false 可复现消融基线 |
+| RETRIEVAL_REWRITE_SCORE | 0.70 | 首轮 Rerank 最高分低于该值时启用同义扩展兜底召回 |
+| RETRIEVAL_MIN_SCORE | 0.64 | 低于该值判定「菜单无法回答」（返回 `answerable=false`） |
 | BM25_EXPANSION_WEIGHT | 0.5 | 扩展词的 BM25 分数权重 |
 | MYSQL_POOL_SIZE | 10 | MySQL 连接池大小 |
 | AGENT_MEMORY_TTL / AGENT_MEMORY_TURNS | 86400 / 6 | 会话记忆过期时间（秒）与保留轮数 |
@@ -280,8 +303,8 @@ python scripts/loadtest.py --concurrency 20 --duration 10 --paths /healthy,/menu
 ## 已知限制
 
 - 检索指标基于 153 道菜品、150 条标注的模拟数据，用于链路验证与回归对比；不含菜名的口语化改写仍是主要失误来源。
-- DashScope Rerank 依赖免费额度：`gte-rerank-v2` 额度耗尽后已切到 `qwen3-rerank`，`RETRIEVAL_MIN_SCORE=0.40` 与 `RETRIEVAL_REWRITE_SCORE=0.55` 都按 `qwen3-rerank` 的分数区间标定；换模型需重跑 `scripts/eval_rag.py` 重新标定。Rerank 完全不可用时自动降级为融合排序，拒答判定返回「无法判断」而不是误判。
-- 菜品图片只覆盖部分菜品，无图菜品用菜名首字占位；原图体积偏大（数 MB 级 PNG），尚未做压缩与 CDN。
+- DashScope Rerank 的免费额度很紧张：`gte-rerank-v2`、`qwen3-rerank`、`qwen3-vl-rerank` 三个模型在本项目评测过程中先后耗尽（`AllocationQuota.FreeTierOnly`），需充值或关闭控制台的「仅使用免费额度」。`RETRIEVAL_MIN_SCORE=0.64`、`RETRIEVAL_REWRITE_SCORE=0.70` 按 `qwen3-vl-rerank` 的分数区间标定，换模型需重跑评测重新标定。Rerank 不可用时自动降级为融合排序、拒答判定返回「无法判断」；此时基线对比只校验向量与融合指标，不会误报回退。
+- 菜品图片只覆盖 153 道中的 12 道，无图菜品用菜名首字占位；图片已从 2048×2048 的 5~8MB PNG 压缩为 800px JPEG（每张 57~115KB，总体积约 1MB），前端按侧栏滚动容器懒加载。
 - 支付为模拟实现，未接入真实支付渠道；通知推送为 `BackgroundTasks` 占位逻辑。
 
 ---

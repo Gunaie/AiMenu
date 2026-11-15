@@ -59,7 +59,7 @@ export const useMenuStore = defineStore('menu', () => {
   const getDishImageUrl = (name) => {
     if (!name) return ''
     // 使用本地图片路径，图片放在 public/images/ 目录下
-    return `/images/${name}.png`
+    return `/images/${name}.jpg`
   }
 
   const highlightRecommendedItems = (menuIds) => {

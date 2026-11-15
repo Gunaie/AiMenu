@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   backend:
@@ -37,3 +38,55 @@ jobs:
         run: npm ci
       - name: Build
         run: npm run build
+
+  # 真实链路检索评测：默认不跑，配置仓库变量 RUN_RETRIEVAL_EVAL=true
+  # 或手动触发 workflow_dispatch 后才执行；需要 secret DASHSCOPE_API_KEY。
+  retrieval-eval:
+    name: Retrieval eval (optional)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || vars.RUN_RETRIEVAL_EVAL == 'true'
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: menu
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+    env:
+      DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - name: Skip when API key is missing
+        if: env.DASHSCOPE_API_KEY == ''
+        run: echo "::warning::未配置 DASHSCOPE_API_KEY，跳过真实检索评测"
+      - name: Install dependencies
+        if: env.DASHSCOPE_API_KEY != ''
+        run: pip install -r requirements.txt
+      - name: Prepare .env
+        if: env.DASHSCOPE_API_KEY != ''
+        run: |
+          cp .env.example .env
+          sed -i "s#^DASHSCOPE_API_KEY=.*#DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}#" .env
+      - name: Initialize menu and vectors
+        if: env.DASHSCOPE_API_KEY != ''
+        run: python setup_db.py
+      - name: Evaluate and compare with baseline
+        if: env.DASHSCOPE_API_KEY != ''
+        run: |
+          python scripts/eval_rag.py --top-k 3 --quiet --no-ablation \
+            --baseline data/eval_baseline.json \
+            --json eval_result.json

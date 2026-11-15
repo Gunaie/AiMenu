@@ -404,7 +404,7 @@ def get_menu_items() -> List[Dict[str, Any]]:
                     "vegetarian_text": "是" if item['is_vegetarian'] else "否",
                     "allergens": item['allergens'] if item['allergens'] and item['allergens'].strip() else "暂无过敏原",
                     "is_available": bool(item['is_available']),
-                    "image_url": f"/images/{item['dish_name']}.png"
+                    "image_url": f"/images/{item['dish_name']}.jpg"
                 }
                 menu_items_list.append(processed_item)
 

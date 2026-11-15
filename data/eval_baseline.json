@@ -1,0 +1,28 @@
+{
+  "_comment": "由 scripts/eval_rag.py 在 153 道菜品、150 条标注、18 条域外问题上实测生成（qwen3-vl-rerank），用于 --baseline 检测检索效果回退。换 Rerank 模型或语料后需重新生成。",
+  "top_k": 3,
+  "query_count": 150,
+  "corpus_size": 153,
+  "rerank_enabled": true,
+  "rerank_model": "qwen3-vl-rerank",
+  "vector_only": {
+    "recall_at_k": 0.9733,
+    "mrr": 0.9456
+  },
+  "fusion_only": {
+    "recall_at_k": 0.96,
+    "mrr": 0.9344
+  },
+  "hybrid": {
+    "recall_at_k": 0.9933,
+    "mrr": 0.9789
+  },
+  "refusal": {
+    "threshold": 0.64,
+    "positive_accept_rate": 1.0,
+    "positive_misreject_count": 0,
+    "positive_total": 150,
+    "negative_refusal_rate": 1.0,
+    "negative_total": 18
+  }
+}
