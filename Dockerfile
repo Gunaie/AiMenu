@@ -13,10 +13,9 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# 运行期只需 curl 做健康检查，构建工具留在 builder
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd -r app && useradd -r -g app app
+# 只创建非 root 用户；健康检查用 Python 标准库（见 docker-compose.yml），
+# 因此不依赖 apt 装 curl，构建阶段无需访问 deb.debian.org
+RUN groupadd -r app && useradd -r -g app app
 
 COPY --from=builder /install /usr/local
 COPY . .
