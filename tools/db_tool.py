@@ -16,7 +16,8 @@ from dotenv import load_dotenv
 from typing import Dict, Any, List, Optional
 from tools.redis_tool import cache
 
-load_dotenv()
+# 以 .env 为准：避免系统中残留的旧配置覆盖项目配置
+load_dotenv(override=True)
 
 
 class DataBaseConnection:
@@ -295,6 +296,20 @@ def get_all_menu_items() -> str:
         logger.error(f"查询所有菜品信息字符串结果失败: {e}")
         return "查询菜品信息失败"
 
+
+
+def get_menu_item_by_id(dish_id: int) -> Optional[Dict[str, Any]]:
+    """按 ID 查询单个菜品（用于下单时服务端重算价格）"""
+    try:
+        with DataBaseConnection() as db:
+            db.cursor.execute(
+                "SELECT id, dish_name, price, is_available FROM menu_items WHERE id = %s",
+                (dish_id,)
+            )
+            return db.cursor.fetchone()
+    except Exception as e:
+        logger.error(f"查询菜品失败: {e}")
+        return None
 
 
 def get_menu_items() -> List[Dict[str, Any]]:

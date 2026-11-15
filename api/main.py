@@ -168,11 +168,13 @@ class OrderItem(BaseModel):
     quantity: int
 
 # 定义提交订单请求模型
+# total_amount / delivery_fee / actual_amount 仅用于展示，服务端会依据数据库价格与配送距离重新计算
 class OrderSubmitRequest(BaseModel):
-    total_amount: float
-    delivery_fee: float
-    actual_amount: float
+    total_amount: Optional[float] = None
+    delivery_fee: Optional[float] = None
+    actual_amount: Optional[float] = None
     delivery_address: str
+    travel_mode: PathInputModel = "2"
     items_detail: List[OrderItem]
 
 # 定义通用操作响应模型
@@ -398,9 +400,9 @@ async def order_submit_endpoint(
 ):
     """提交订单接口 (需要登录)"""
     from service.diancan_service import submit_order
-    order_data = request.dict()
+    order_data = request.model_dump()
     order_data['user_id'] = current_user['id']  # 绑定当前用户
-    
+
     result = submit_order(order_data)
     
     # 添加后台任务：发送通知
@@ -412,11 +414,12 @@ async def order_submit_endpoint(
 
 @app.post("/order/pay/{order_no}", response_model=ActionResponse)
 async def order_pay_endpoint(order_no: str, current_user: dict = Depends(get_current_user)):
-    """模拟支付接口 (需要登录)"""
+    """模拟支付接口 (需要登录，且只能支付自己的订单)"""
     from service.diancan_service import pay_order
-    # 这里可以增加权限校验，确保订单属于当前用户
-    result = pay_order(order_no)
-    return ActionResponse(**result)
+    result = pay_order(order_no, user_id=current_user['id'])
+    if result.get("forbidden"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=result["message"])
+    return ActionResponse(**{k: v for k, v in result.items() if k != "forbidden"})
 
 
 @app.get("/order/list")
