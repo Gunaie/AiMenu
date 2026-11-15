@@ -1,137 +1,173 @@
 # AiMenu 智能点餐系统 (AiMenu Smart Ordering System)
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![Vue](https://img.shields.io/badge/vue-3.3-green)](https://vuejs.org/)
-[![Docker](https://img.shields.io/badge/docker-supported-blue)](https://www.docker.com/)
+[![Docker](https://img.shields.io/badge/docker-middleware-blue)](https://www.docker.com/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-AiMenu 是一款工业级的智能点餐系统，集成了大语言模型（LLM）、LangGraph 状态机、RAG 混合检索及地理信息服务，旨在提供极简且智能的用餐体验。
+AiMenu 是一个可本地运行的全栈 AI 点餐项目：FastAPI 提供业务接口，LangGraph 编排工具调用型 Agent，
+ChromaDB + BM25 + Rerank 完成菜品检索，高德地图负责配送范围校验，Vue 3 + Element Plus 提供点餐界面。
 
-## 🌟 项目亮点
+> 指标说明：以下检索指标由 `scripts/eval_rag.py` 在 12 道菜品的本地语料上实测（36 条标注），
+> 可通过同一脚本复现；小规模语料下的绝对值不代表大规模场景效果。
 
-- **🤖 智能对话管家**: 基于 LangGraph 构建的 AI Agent，支持多轮对话、意图识别（菜单咨询、配送校验、常规闲聊）。
-- **🔍 工业级 RAG 检索**: 采用混合检索架构（Vector Search + BM25），结合高德地图 API 实时数据，实现精准的菜品推荐和地理校验。
-- **🚚 智能配送体系**: 集成高德地图 API，支持地址自动补全、实时配送费计算及下单范围拦截。
-- **🏗️ 现代技术栈**: 前端 Vue 3 + Element Plus，后端 FastAPI，缓存 Redis 7.0，向量数据库 ChromaDB。
-- **🚀 工程化实践**: 完整的 Docker 容器化部署，包含健康检查、LangSmith 链路监控及多阶段镜像构建。
+---
 
-## 📁 目录结构说明
+## 核心能力
+
+- **工具调用型 Agent**：基于 LangGraph 构建「决策 → 调用工具 → 生成回复」循环，接入菜单检索、配送校验、订单查询三类工具，支持 SSE 流式输出与多轮上下文。
+- **混合检索**：向量召回（text-embedding-v4）+ BM25 关键词召回，合并去重后由 DashScope Rerank 精排；Rerank 不可用时自动降级为融合结果。
+- **配送范围校验**：高德地址补全、地理编码与路径规划，按距离计算阶梯配送费并拦截超范围下单。
+- **订单闭环**：JWT 登录、菜单、购物车、下单、模拟支付、订单历史；金额与配送费由服务端重算。
+- **缓存与一致性**：Redis 缓存地理编码、距离计算结果与菜单热点数据；菜品更新采用延迟双删策略。
+
+---
+
+## 技术栈
+
+| 层次 | 技术 |
+| --- | --- |
+| 后端 | FastAPI、Uvicorn、Pydantic |
+| AI | LangGraph、LangChain、Qwen-Plus（DashScope）、text-embedding-v4、gte-rerank |
+| 检索 | ChromaDB、rank_bm25、jieba |
+| 存储 | MySQL 8、Redis 7 |
+| 前端 | Vue 3、Element Plus、Vite |
+| 部署 | Docker / Docker Compose |
+
+---
+
+## 目录结构
 
 ```text
-smart_diancan/
-├── agent/              # AI Agent 核心逻辑 (LangGraph 状态机, 记忆组件)
-├── api/                # FastAPI 接口定义与路由
-├── prompt/             # 系统提示词模版 (意图识别, 菜品咨询)
-├── service/            # 业务服务层 (点餐逻辑封装)
-├── tests/              # 自动化测试用例
-├── tools/              # 核心工具库 (MySQL, Redis, ChromaDB, AMap)
+AiMenu/
+├── agent/              # Agent 状态机、工具定义
+├── api/                # FastAPI 路由与请求/响应模型
+├── service/            # 业务服务层（点餐、订单、支付）
+├── tools/              # MySQL / Redis / ChromaDB / 高德 / JWT 工具
+├── tests/              # 单元测试与接口测试
+├── scripts/            # 检索评测脚本
 ├── ui/                 # Vue 3 前端工程
-│   ├── src/            # 前端源码
-│   └── nginx.conf      # 生产环境 Nginx 配置
-├── Dockerfile          # 后端镜像构建脚本
-├── docker-compose.yml  # 全栈容器编排配置
-└── run.py              # 本地启动入口脚本
+├── docker-compose.yml  # MySQL(3307) + Redis(6379)
+├── Dockerfile          # 后端镜像
+├── setup_db.py         # 建表 + 菜品数据初始化 + 向量同步
+├── run.py              # 后端启动入口
+└── requirements.txt
 ```
 
-## 🛠️ 环境配置
+---
 
-### 1. 基础环境
-- Docker & Docker Desktop (推荐)
-- Python 3.10+ (本地开发环境)
-- Node.js 18+ (本地开发环境)
+## 快速开始
 
-### 2. 环境变量配置
-在根目录下创建 `.env` 文件，并参考以下配置：
-
-```env
-# 高德地图 API (用于配送校验与地址建议)
-AMAP_API_KEY=您的密钥
-
-# 大语言模型配置 (推荐使用通义千问 Qwen 系列)
-DASHSCOPE_API_KEY=您的密钥
-DASHSCOPE_MODEL_NAME=qwen-plus
-DASHSCOPE_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1/
-
-# LangSmith 链路监控 (可选)
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_API_KEY=您的密钥
-LANGCHAIN_PROJECT=smart-diancan
-
-# 数据库配置 (Docker 内部自动配置)
-MYSQL_DB_NAME=menu
-MYSQL_USER_PASSWORD=root
-```
-
-## 🚀 快速启动
-
-### 使用 Docker 一键部署 (推荐)
+### 1. 配置环境变量
 
 ```bash
-# 1. 克隆项目
-git clone https://github.com/your-repo/smart-diancan.git
-cd smart-diancan
-
-# 2. 启动所有服务
-docker-compose up -d --build
+# Windows
+copy .env.example .env
+# macOS / Linux
+cp .env.example .env
 ```
 
-启动完成后即可访问：
-- **前端界面**: [http://localhost:80](http://localhost:80)
-- **API 文档**: [http://localhost:8001/docs](http://localhost:8001/docs)
+至少需要填写 `DASHSCOPE_API_KEY`（大模型与向量化）和 `AMAP_API_KEY`（配送校验）。
 
-### 本地开发启动
+### 2. 启动中间件
 
-**后端:**
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+docker compose up -d
+```
+
+默认启动 MySQL（宿主机 3307）与 Redis（宿主机 6379）。
+
+### 3. 初始化并启动后端
+
+```bash
+# 推荐使用 uv
+uv venv --python 3.10
+.venv\Scripts\activate        # macOS/Linux: source .venv/bin/activate
+uv pip install -r requirements.txt
+
+python setup_db.py            # 建表 + 12 道菜品 + 向量入库（仅首次）
 python run.py
 ```
 
-**前端:**
+API 地址：http://127.0.0.1:8001 ，接口文档：http://127.0.0.1:8001/docs
+
+### 4. 启动前端
+
 ```bash
 cd ui
 npm install
 npm run dev
 ```
 
-## 🧪 评估与性能 (Evaluation)
+访问 http://localhost:3000 （Vite 已配置 `/api` 代理到后端）。
 
-项目集成了 **LangSmith** 链路监控与评估系统，通过对比实验得出以下结论：
-
-- **RAG 检索增强**: 引入 **BM25 + 向量混合检索** 后，对于菜品别名（如“东坡肉”与“红烧肉”）的识别召回率提升了 **32%**，解决了纯向量检索在专有名词匹配上的局限性。
-- **Agent 性能**: 采用 **LangGraph 状态机** 替代传统的单链结构，使意图识别的准确率达到 **95%** 以上，并支持工具调用的动态决策。
-- **响应速度**: 通过 **Redis 缓存** 高德地图地理编码结果，使配送校验接口的平均响应时间从 **800ms 降至 150ms**。
-
-## 🛠️ 技术深度说明
-
-- **缓存一致性**: 在菜品数据更新时采用 **“延迟双删” (Cache Double Delete)** 策略，确保分布式环境下数据库与 Redis 缓存的最终一致性。
-- **异步处理**: 利用 FastAPI **BackgroundTasks** 实现订单通知与日志处理的异步化，主流程响应零延迟。
-- **智能体进化**: Agent 采用标准的 **Tool-Calling** 架构，具备自主选择工具（菜单搜索、配送校验、订单查询）的能力，支持多步推理与多轮对话。
-
-## 🧪 自动化测试
-
-项目包含完整的单元测试与集成测试，确保核心逻辑的稳定性：
+### 可选：构建镜像
 
 ```bash
-# 运行所有测试
-pytest tests/
+docker build -t aimenu-backend .
+docker build -t aimenu-web ./ui
 ```
 
-## 📝 开发计划 (Roadmap)
+`ui/nginx.conf` 已包含 `/api` 反向代理与 SSE 关闭缓冲的配置。
 
-- [x] LangGraph 多轮对话与状态管理
-- [x] RAG 混合检索优化 (BM25 + Rerank)
-- [x] Docker 容器化与健康检查
-- [ ] AI 订单状态查询插件
-- [ ] 接入支付系统 (微信/支付宝模拟)
-- [ ] 移动端小程序适配
+---
 
-## 🤝 贡献指南
+## 测试与评测
 
-欢迎提交 Issue 或 Pull Request 来完善这个项目。在提交 PR 前，请确保已通过所有自动化测试。
+```bash
+# 单元测试与接口测试（不依赖数据库、外部 API）
+pytest -q
 
-## 📄 开源协议
+# 真实链路检索评测（需要 DashScope 可用 + 已执行 setup_db.py）
+python scripts/eval_rag.py --top-k 3 --json eval_result.json
 
-本项目基于 [MIT License](LICENSE) 协议开源。
+# 将检索评测接入 pytest（可选）
+RUN_INTEGRATION=1 pytest tests/test_retrieval.py -s
+```
+
+`scripts/eval_rag.py` 内置 36 条「query → 期望菜品」标注，分别统计纯向量检索与混合检索的
+Recall@K 和 MRR；若 Embedding 接口不可用，脚本会直接中止而不是输出失真指标。
+
+### 实测结果（Top-3，Rerank 已启用）
+
+| 检索策略 | Recall@3 | MRR |
+| --- | --- | --- |
+| 纯向量检索 | 0.9167 | 0.8472 |
+| 向量 + BM25 + Rerank | **1.0000** | **0.9583** |
+
+语料为 `setup_db.py` 初始化的 12 道菜，标注集见 `scripts/eval_rag.py` 中的 `LABELED_QUERIES`。
+语料规模较小，指标主要用于验证链路与回归对比，不构成大规模检索效果的结论。
+
+---
+
+## 安全设计
+
+- 密码使用 bcrypt 加盐哈希，认证使用 JWT Bearer Token。
+- 支付接口校验订单归属，越权操作返回 403。
+- 下单金额、配送费由服务端依据数据库价格与实时距离重算，不信任客户端传值。
+- SQL 全部参数化；Agent 的订单查询工具强制按当前 `user_id` 过滤。
+
+---
+
+## 已知限制
+
+- Agent 记忆使用进程内 `MemorySaver`，重启即丢失，暂不支持多实例部署。
+- 数据库访问与地图请求为同步实现，在 async 路由中直接调用会阻塞事件循环，高并发场景需改为异步驱动或线程池。
+- 菜单仅 12 条，检索指标不代表大规模语料下的效果。
+- 支付为模拟实现，未接入真实支付渠道；通知推送为 `BackgroundTasks` 占位逻辑。
+- 菜品 `category` 字段与前端筛选（川菜/粤菜/浙菜）尚未完全对齐。
+
+---
+
+## 测试账号
+
+- 用户名：`admin`
+- 密码：`password123`
+
+首次部署后请立即修改默认密码与 `JWT_SECRET_KEY`。
+
+---
+
+## License
+
+本项目基于 [MIT License](LICENSE) 开源。
