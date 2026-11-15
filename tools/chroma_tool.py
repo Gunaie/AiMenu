@@ -329,13 +329,20 @@ class ChromaVectorDB:
                             "source": "bm25"
                         })
 
-            # 3. 合并去重
-            all_candidates = []
-            seen_contents = set()
-            for c in vector_candidates + bm25_candidates:
-                if c['content'] not in seen_contents:
-                    all_candidates.append(c)
-                    seen_contents.add(c['content'])
+            # 3. 合并去重 + RRF 融合排序（Rerank 不可用时按此顺序降级返回）
+            candidates: Dict[str, Dict[str, Any]] = {}
+            fusion_scores: Dict[str, float] = {}
+            for source_candidates in (vector_candidates, bm25_candidates):
+                for rank, candidate in enumerate(source_candidates, 1):
+                    content = candidate['content']
+                    candidates.setdefault(content, candidate)
+                    fusion_scores[content] = fusion_scores.get(content, 0.0) + 1.0 / (60 + rank)
+
+            all_candidates = sorted(
+                candidates.values(),
+                key=lambda c: fusion_scores[c['content']],
+                reverse=True,
+            )
 
             # 4. Rerank 重排序 (取前 top_k)
             if all_candidates:
