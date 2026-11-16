@@ -199,11 +199,13 @@ pip install -r requirements-local-rerank.txt
 # .env 中设置：
 # RERANK_PROVIDER=local
 # LOCAL_RERANK_MODEL=BAAI/bge-reranker-v2-m3
+# EMBEDDING_MODEL=text-embedding-v3
+# EMBEDDING_DIM=1024
 # RETRIEVAL_MIN_SCORE=0.245
 ```
 
-云端 Rerank 额度用尽时会自动降级为融合排序，不阻断对话；切换模型后必须用
-`scripts/eval_threshold.py` 重新标定阈值。
+换 embedding 模型后需执行 `python setup_db.py` 重建索引，并用 `scripts/eval_threshold.py` 重新标定阈值；
+云端 Rerank 额度用尽时会自动降级为融合排序，不阻断对话。
 
 ---
 
@@ -242,7 +244,7 @@ pip install -r requirements-local-rerank.txt
 - 属性约束类检索 Top-1 0.4947 / Top-3 0.6842（硬过滤后 Rerank 只在有效集合里排，Top-3 较 v4 提升 +1.05pt）；「预算 + 属性」型 query 的 Rerank 分数仍偏低，存在误拒。
 - Agent 多轮场景下，对**没有新查询对象、只改约束**的追问（如「都不要辣的」），LLM 有漏调 `search_menu` 的倾向——误以为上一轮已检索过、不需要再搜。**已通过 P1 强制注入修复**（`agent/langgraph_agent.py` 的 `call_model()` 末尾 post-check）：LLM 没调工具 + 命中纯约束变更正则 → 强制注入 `search_menu`，同时手动更新约束槽位；三层死循环防护（最近 search_menu 检查、迭代上限 12、系统 prompt 第 9 条）防注入循环和 LLM 主动重复调工具。
 - Agent 端到端评测为 65 条固定用例（含 4 条 P0 新增的多轮约束/菜名有效性用例），最终答复与拒答由 LLM 评审判定，重跑有波动，不能替代真实流量。
-- 本地 Rerank 为 CPU 推理，单次混合检索 P50 约 2.7s；云端 Rerank 额度紧张，需关注降级行为。
+- 本地 Rerank 为 CPU 推理，单次混合检索 P50 约 2.60s；云端 Rerank 额度紧张，需关注降级行为。
 - 支付为模拟实现；通知推送为 `BackgroundTasks` 占位；JWT 无 refresh token 与主动吊销。
 - 菜品图片仅覆盖 12/1060，其余用菜名首字占位。
 
