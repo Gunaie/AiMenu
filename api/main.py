@@ -435,12 +435,18 @@ def delivery_endpoint(request: DeliveryRequest, current_user: dict = Depends(get
 def order_submit_endpoint(
     request: OrderSubmitRequest, 
     background_tasks: BackgroundTasks,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key", max_length=64)
 ):
-    """提交订单接口 (需要登录)；DB 与高德调用均为同步，交给线程池执行"""
+    """提交订单接口 (需要登录)；DB 与高德调用均为同步，交给线程池执行
+
+    客户端可带 Idempotency-Key 请求头：重复提交（重试/双击）会返回同一笔订单，
+    不会重复扣库存。
+    """
     from service.diancan_service import submit_order
     order_data = request.model_dump()
     order_data['user_id'] = current_user['id']  # 绑定当前用户
+    order_data['idempotency_key'] = idempotency_key
 
     result = submit_order(order_data)
     
@@ -458,11 +464,14 @@ def order_pay_endpoint(order_no: str, current_user: dict = Depends(get_current_u
     result = pay_order(order_no, user_id=current_user['id'])
     if result.get("forbidden"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=result["message"])
+    if result.get("conflict"):
+        # 已取消/已完成的订单不能再支付，状态机拒绝非法跃迁
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=result["message"])
     return ActionResponse(**{k: v for k, v in result.items() if k != "forbidden"})
 
 
 @app.get("/order/list")
-def order_list_endpoint(limit: int = 10, current_user: dict = Depends(get_current_user)):
+def order_list_endpoint(limit: int = Query(10, ge=1, le=100), current_user: dict = Depends(get_current_user)):
     """获取当前用户的订单历史列表"""
     from tools.db_tool import get_all_orders
     orders = get_all_orders(user_id=current_user['id'], limit=limit)

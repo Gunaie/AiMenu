@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 import mysql.connector
 from mysql.connector import pooling
 import json
+import uuid
 from datetime import datetime
 from dotenv import load_dotenv
 from typing import Dict, Any, List, Optional
@@ -52,6 +53,75 @@ def _get_connection_pool() -> pooling.MySQLConnectionPool:
                 )
                 logger.info("MySQL 连接池初始化完成")
     return _connection_pool
+
+
+# ====================== 订单域：异常与状态机 ======================
+
+class OrderError(Exception):
+    """订单业务异常（可直接展示给用户）"""
+
+
+class InsufficientStockError(OrderError):
+    """库存不足"""
+
+
+class InvalidOrderTransition(OrderError):
+    """非法的订单状态跃迁"""
+
+
+# 订单状态机：待支付 → 已支付 → 已完成；待支付可取消，终态不可再变更
+ORDER_STATUS_PENDING = "pending"
+ORDER_STATUS_PAID = "paid"
+ORDER_STATUS_COMPLETED = "completed"
+ORDER_STATUS_CANCELLED = "cancelled"
+
+ORDER_TRANSITIONS: Dict[str, set] = {
+    ORDER_STATUS_PENDING: {ORDER_STATUS_PAID, ORDER_STATUS_CANCELLED},
+    ORDER_STATUS_PAID: {ORDER_STATUS_COMPLETED},
+    ORDER_STATUS_COMPLETED: set(),
+    ORDER_STATUS_CANCELLED: set(),
+}
+
+
+def can_transition_order_status(current: str, target: str) -> bool:
+    """判断订单状态是否允许从 current 跃迁到 target"""
+    return target in ORDER_TRANSITIONS.get(current or ORDER_STATUS_PENDING, set())
+
+
+def _table_exists(cursor, table: str) -> bool:
+    """判断当前库中是否存在指定表（用于平滑升级）"""
+    cursor.execute(
+        "SELECT COUNT(*) AS cnt FROM information_schema.tables "
+        "WHERE table_schema = DATABASE() AND table_name = %s",
+        (table,),
+    )
+    return bool(cursor.fetchone()["cnt"])
+
+
+def _ensure_column(cursor, table: str, column: str, ddl: str) -> bool:
+    """表缺列时补列，返回是否真的执行了 ALTER"""
+    cursor.execute(
+        "SELECT COUNT(*) AS cnt FROM information_schema.columns "
+        "WHERE table_schema = DATABASE() AND table_name = %s AND column_name = %s",
+        (table, column),
+    )
+    if cursor.fetchone()["cnt"]:
+        return False
+    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+    return True
+
+
+def _ensure_index(cursor, table: str, index_name: str, ddl: str) -> bool:
+    """表缺索引时补建，返回是否真的执行了 ALTER"""
+    cursor.execute(
+        "SELECT COUNT(*) AS cnt FROM information_schema.statistics "
+        "WHERE table_schema = DATABASE() AND table_name = %s AND index_name = %s",
+        (table, index_name),
+    )
+    if cursor.fetchone()["cnt"]:
+        return False
+    cursor.execute(f"ALTER TABLE {table} ADD {ddl}")
+    return True
 
 
 class DataBaseConnection:
@@ -98,6 +168,11 @@ class DataBaseConnection:
         if self.connection:
             self.connection.commit()
 
+    def rollback(self):
+        """回滚事务（异常路径必须显式回滚，及时释放行锁）"""
+        if self.connection:
+            self.connection.rollback()
+
     def __enter__(self):
         if self.initialize_connection():
             return self
@@ -140,8 +215,10 @@ def init_db():
                 order_status VARCHAR(20) DEFAULT 'pending',
                 payment_status VARCHAR(20) DEFAULT 'unpaid',
                 items_detail JSON NOT NULL,
+                idempotency_key VARCHAR(64) DEFAULT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+                UNIQUE KEY uk_orders_idempotency_key (idempotency_key)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
             """
             db.cursor.execute(create_orders_sql)
@@ -152,6 +229,19 @@ def init_db():
                 db.cursor.execute("ALTER TABLE orders ADD COLUMN user_id INT AFTER order_no")
                 db.cursor.execute("ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL")
                 logger.info("平滑升级：已为 orders 表增加 user_id 列")
+
+            # 平滑升级：幂等键列 + 唯一索引（NULL 不参与唯一性，历史订单不受影响）
+            if _ensure_column(db.cursor, "orders", "idempotency_key",
+                              "idempotency_key VARCHAR(64) DEFAULT NULL AFTER items_detail"):
+                logger.info("平滑升级：已为 orders 表增加 idempotency_key 列")
+            _ensure_index(db.cursor, "orders", "uk_orders_idempotency_key",
+                          "UNIQUE KEY uk_orders_idempotency_key (idempotency_key)")
+
+            # menu_items 由 setup_db.py 负责建表，这里只在表已存在时补库存列
+            if _table_exists(db.cursor, "menu_items"):
+                if _ensure_column(db.cursor, "menu_items", "stock",
+                                  "stock INT DEFAULT NULL AFTER is_available"):
+                    logger.info("平滑升级：已为 menu_items 表增加 stock 列")
 
             db.commit()
             logger.info("数据库表结构初始化/检查成功")
@@ -189,52 +279,184 @@ def create_user(user_data: Dict[str, Any]) -> bool:
         return False
 
 
-def create_order(order_data: Dict[str, Any]) -> Optional[str]:
-    """创建新订单"""
-    try:
-        # 生成订单号
-        import time
-        import random
-        order_no = f"ORD{int(time.time())}{random.randint(1000, 9999)}"
+def _generate_order_no() -> str:
+    """生成订单号：时间戳 + 随机后缀，避免高并发下秒级重复"""
+    return f"ORD{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:6].upper()}"
 
+
+def _query_order_no_by_idempotency_key(cursor, idempotency_key: str) -> Optional[str]:
+    """在当前连接（事务）内按幂等键查订单号"""
+    cursor.execute("SELECT order_no FROM orders WHERE idempotency_key = %s", (idempotency_key,))
+    row = cursor.fetchone()
+    return row["order_no"] if row else None
+
+
+def get_order_no_by_idempotency_key(idempotency_key: str) -> Optional[str]:
+    """按幂等键查询已存在的订单号（新连接，用于唯一索引冲突后的兜底查询）"""
+    try:
         with DataBaseConnection() as db:
-            insert_sql = """
-            INSERT INTO orders 
-            (order_no, user_id, total_amount, delivery_fee, actual_amount, delivery_address, items_detail)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """
-            db.cursor.execute(insert_sql, (
-                order_no,
-                order_data.get('user_id'),
-                order_data['total_amount'],
-                order_data['delivery_fee'],
-                order_data['actual_amount'],
-                order_data['delivery_address'],
-                json.dumps(order_data['items_detail'], ensure_ascii=False)
-            ))
-            db.commit()
-            logger.info(f"订单 {order_no} 创建成功")
-            return order_no
+            return _query_order_no_by_idempotency_key(db.cursor, idempotency_key)
     except Exception as e:
-        logger.error(f"创建订单失败: {e}")
+        logger.error(f"按幂等键查询订单失败: {e}")
+        return None
+
+
+def create_order(order_data: Dict[str, Any]) -> Optional[str]:
+    """创建订单（单事务完成：幂等校验 → 锁库存 → 扣减 → 写订单）
+
+    库存语义：menu_items.stock 为 NULL 表示不限量；为整数时按份数扣减，
+    不足则整单拒绝。整个流程在一个事务内完成，任何一步失败都会 ROLLBACK，
+    因此不会出现「订单已生成但库存没扣」或「库存扣了但订单没落库」。
+
+    order_data 可带 idempotency_key：同一键重复提交直接返回原订单号，
+    并发重复提交由唯一索引 uk_orders_idempotency_key 兜底。
+
+    :return: 订单号；非业务性的数据库故障返回 None
+    """
+    items = order_data.get("items_detail") or []
+    if not items:
+        raise OrderError("订单中没有任何菜品")
+
+    # 同一道菜可能分多行提交，扣库存前先按菜品聚合
+    quantity_by_dish: Dict[int, int] = {}
+    for item in items:
+        if item.get("id") is None:
+            raise OrderError("订单中存在缺少菜品 ID 的条目")
+        dish_id = int(item["id"])
+        quantity_by_dish[dish_id] = quantity_by_dish.get(dish_id, 0) + int(item.get("quantity") or 0)
+
+    idempotency_key = (order_data.get("idempotency_key") or "").strip() or None
+    if idempotency_key and len(idempotency_key) > 64:
+        raise OrderError("Idempotency-Key 过长（最多 64 个字符）")
+
+    order_no = _generate_order_no()
+    try:
+        with DataBaseConnection() as db:
+            try:
+                if idempotency_key:
+                    existing_order_no = _query_order_no_by_idempotency_key(db.cursor, idempotency_key)
+                    if existing_order_no:
+                        logger.info(f"幂等命中，返回已有订单 {existing_order_no}")
+                        return existing_order_no
+
+                # 按菜品 ID 升序加行锁：固定加锁顺序，避免多菜品订单交叉等待造成死锁
+                dish_ids = sorted(quantity_by_dish)
+                placeholders = ", ".join(["%s"] * len(dish_ids))
+                db.cursor.execute(
+                    f"SELECT id, dish_name, stock FROM menu_items "
+                    f"WHERE id IN ({placeholders}) ORDER BY id FOR UPDATE",
+                    tuple(dish_ids),
+                )
+                dish_rows = {int(row["id"]): row for row in db.cursor.fetchall()}
+                missing = [str(dish_id) for dish_id in dish_ids if dish_id not in dish_rows]
+                if missing:
+                    raise OrderError(f"菜品不存在：{', '.join(missing)}")
+
+                for dish_id in dish_ids:
+                    row = dish_rows[dish_id]
+                    stock = row.get("stock")
+                    if stock is not None and int(stock) < quantity_by_dish[dish_id]:
+                        raise InsufficientStockError(
+                            f"「{row['dish_name']}」库存不足，仅剩 {int(stock)} 份"
+                        )
+
+                for dish_id in dish_ids:
+                    if dish_rows[dish_id].get("stock") is None:
+                        continue  # NULL 表示不限量，不做扣减
+                    db.cursor.execute(
+                        "UPDATE menu_items SET stock = stock - %s WHERE id = %s",
+                        (quantity_by_dish[dish_id], dish_id),
+                    )
+
+                insert_sql = """
+                INSERT INTO orders
+                (order_no, user_id, total_amount, delivery_fee, actual_amount, delivery_address, items_detail, idempotency_key)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """
+                db.cursor.execute(insert_sql, (
+                    order_no,
+                    order_data.get('user_id'),
+                    order_data['total_amount'],
+                    order_data['delivery_fee'],
+                    order_data['actual_amount'],
+                    order_data['delivery_address'],
+                    json.dumps(order_data['items_detail'], ensure_ascii=False),
+                    idempotency_key,
+                ))
+                db.commit()
+                logger.info(f"订单 {order_no} 创建成功")
+                return order_no
+            except Exception:
+                db.rollback()
+                raise
+    except mysql.connector.IntegrityError as e:
+        # 并发同一幂等键：唯一索引兜底，回滚后返回先提交成功的那一单
+        if idempotency_key and e.errno == 1062:
+            existing_order_no = get_order_no_by_idempotency_key(idempotency_key)
+            if existing_order_no:
+                logger.info(f"并发幂等冲突，返回已有订单 {existing_order_no}")
+                return existing_order_no
+        logger.exception("创建订单失败（完整性约束）")
+        return None
+    except OrderError:
+        raise
+    except mysql.connector.Error as e:
+        # 1205 锁等待超时 / 1213 死锁：已回滚，提示重试而不是把异常抛给前端
+        if e.errno in (1205, 1213):
+            logger.warning(f"下单遇到锁等待或死锁，已回滚: {e}")
+            raise OrderError("下单人数较多，请稍后重试") from e
+        logger.exception("创建订单失败")
+        return None
+    except Exception:
+        logger.exception("创建订单失败")
         return None
 
 
 def update_order_status(order_no: str, status: str, payment_status: Optional[str] = None) -> bool:
-    """更新订单状态"""
+    """更新订单状态（带状态机校验，非法跃迁抛 InvalidOrderTransition）
+
+    读取当前状态时加行锁，避免两个并发请求同时把同一订单推进到不同状态。
+    """
     try:
         with DataBaseConnection() as db:
-            if payment_status:
-                update_sql = "UPDATE orders SET order_status = %s, payment_status = %s WHERE order_no = %s"
-                db.cursor.execute(update_sql, (status, payment_status, order_no))
-            else:
-                update_sql = "UPDATE orders SET order_status = %s WHERE order_no = %s"
-                db.cursor.execute(update_sql, (status, order_no))
-            db.commit()
-            return True
+            try:
+                db.cursor.execute(
+                    "SELECT order_status FROM orders WHERE order_no = %s FOR UPDATE",
+                    (order_no,),
+                )
+                row = db.cursor.fetchone()
+                if not row:
+                    db.rollback()
+                    return False
+
+                current = row["order_status"] or ORDER_STATUS_PENDING
+                if not can_transition_order_status(current, status):
+                    db.rollback()
+                    raise InvalidOrderTransition(
+                        f"订单当前状态为 {current}，不能变更为 {status}"
+                    )
+
+                if payment_status:
+                    db.cursor.execute(
+                        "UPDATE orders SET order_status = %s, payment_status = %s WHERE order_no = %s",
+                        (status, payment_status, order_no),
+                    )
+                else:
+                    db.cursor.execute(
+                        "UPDATE orders SET order_status = %s WHERE order_no = %s",
+                        (status, order_no),
+                    )
+                db.commit()
+                return True
+            except Exception:
+                db.rollback()
+                raise
+    except InvalidOrderTransition:
+        raise
     except Exception as e:
         logger.error(f"更新订单状态失败: {e}")
         return False
+
 
 
 def get_order(order_no: str) -> Optional[Dict[str, Any]]:

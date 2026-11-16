@@ -55,10 +55,18 @@ def setup_menu_items():
                 is_vegetarian BOOLEAN DEFAULT FALSE,
                 allergens VARCHAR(255),
                 is_available BOOLEAN DEFAULT TRUE,
+                stock INT DEFAULT NULL, -- NULL 表示不限量；整数表示剩余可售份数
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
             """
             db.cursor.execute(create_table_sql)
+
+            # 平滑升级：老库缺 stock 列时补上（默认 NULL = 不限量，不影响存量菜品）
+            from tools.db_tool import _ensure_column
+            if _ensure_column(db.cursor, "menu_items", "stock",
+                              "stock INT DEFAULT NULL AFTER is_available"):
+                logger.info("平滑升级：已为 menu_items 表增加 stock 列")
+                db.commit()
             
             # 2. 读取菜品数据
             dishes = load_menu_items()
