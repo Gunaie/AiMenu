@@ -1,10 +1,10 @@
 {
-  "_comment": "回归基线：1060 道菜品、585 条分层标注，本地 bge-reranker-v2-m3（RERANK_PROVIDER=local，RETRIEVAL_MIN_SCORE=0.115），2026-11-15 实测。scripts/eval_rag.py --baseline data/eval_baseline.json 用它检测检索效果回退；不保存逐条 details 以控制体积。",
+  "_comment": "回归基线：1060 道菜品、585 条分层标注，text-embedding-v3(1024) + 本地 bge-reranker-v2-m3（RERANK_PROVIDER=local，RETRIEVAL_MIN_SCORE=0.115），2026-11-16 实测。scripts/eval_rag.py --baseline data/eval_baseline.json 用它检测检索效果回退；不保存逐条 details 以控制体积。",
   "top_k": 3,
   "query_count": 585,
   "corpus_size": 1060,
   "rerank_enabled": true,
-  "rerank_model": "BAAI/bge-reranker-v2-m3",
+  "rerank_model": "E:/Trae_i/AiMenu/models/bge-reranker-v2-m3",
   "rerank_provider": "local",
   "random_baseline": {
     "corpus_size": 1060,
@@ -13,39 +13,39 @@
     "recall_at_k": 0.0021
   },
   "vector_only": {
-    "top1": 0.7111,
-    "top3": 0.8547,
-    "recall_at_k": 0.8547,
-    "mrr": 0.7749,
+    "top1": 0.7214,
+    "top3": 0.8359,
+    "recall_at_k": 0.8359,
+    "mrr": 0.7729,
     "query_count": 585
   },
   "fusion_only": {
-    "top1": 0.7607,
-    "top3": 0.8821,
-    "recall_at_k": 0.8821,
-    "mrr": 0.8157,
+    "top1": 0.7385,
+    "top3": 0.8735,
+    "recall_at_k": 0.8735,
+    "mrr": 0.8,
     "query_count": 585
   },
   "hybrid": {
-    "top1": 0.8171,
-    "top3": 0.906,
-    "recall_at_k": 0.906,
-    "mrr": 0.8564,
+    "top1": 0.812,
+    "top3": 0.9043,
+    "recall_at_k": 0.9043,
+    "mrr": 0.8524,
     "query_count": 585
   },
   "by_type": {
     "attribute": {
       "top1": 0.4947,
-      "top3": 0.6737,
-      "recall_at_k": 0.6737,
-      "mrr": 0.5684,
+      "top3": 0.6842,
+      "recall_at_k": 0.6842,
+      "mrr": 0.5719,
       "query_count": 95
     },
     "colloquial": {
-      "top1": 0.8037,
-      "top3": 0.9185,
-      "recall_at_k": 0.9185,
-      "mrr": 0.8556,
+      "top1": 0.7889,
+      "top3": 0.9074,
+      "recall_at_k": 0.9074,
+      "mrr": 0.842,
       "query_count": 270
     },
     "name_exact": {
@@ -56,62 +56,47 @@
       "query_count": 125
     },
     "near_miss": {
-      "top1": 0.9368,
-      "top3": 0.9789,
-      "recall_at_k": 0.9789,
-      "mrr": 0.9579,
+      "top1": 0.9474,
+      "top3": 0.9895,
+      "recall_at_k": 0.9895,
+      "mrr": 0.9684,
       "query_count": 95
     }
   },
   "latency_ms": {
     "vector_only": {
       "count": 585,
-      "p50_ms": 158.1,
-      "p95_ms": 364.9,
-      "mean_ms": 287.2
+      "p50_ms": 155.6,
+      "p95_ms": 213.0,
+      "mean_ms": 198.7
     },
     "fusion_only": {
       "count": 585,
-      "p50_ms": 9.6,
-      "p95_ms": 19.0,
-      "mean_ms": 18.6
+      "p50_ms": 8.5,
+      "p95_ms": 11.9,
+      "mean_ms": 13.9
     },
     "hybrid": {
       "count": 585,
-      "p50_ms": 2665.7,
-      "p95_ms": 4418.9,
-      "mean_ms": 2844.8
+      "p50_ms": 2597.7,
+      "p95_ms": 4218.1,
+      "mean_ms": 2789.3
     }
   },
   "refusal": {
     "enabled": true,
     "threshold": 0.115,
     "positive_total": 585,
-    "positive_accept_rate": 0.9761,
-    "positive_misreject_count": 14,
+    "positive_accept_rate": 0.9778,
+    "positive_misreject_count": 13,
     "negative_total": 84,
-    "negative_refusal_rate": 0.9524,
+    "negative_refusal_rate": 0.9405,
     "negative_false_accepts": [
+      "这菜里有味精吗",
+      "韩式炸鸡",
       "红烧熊掌",
       "杨枝甘露蛋糕",
-      "123",
-      "？？？"
-    ],
-    "misrejects": [
-      "那种红亮亮的甜口红烧肉",
-      "广式烧腊里的甜口猪肉",
-      "广式茶楼里的水晶蒸饺",
-      "五十块以内、有牛肉的",
-      "四十块以内、卤出来的",
-      "素的凉拌菜，十五块以内",
-      "三十块以内、有鸡蛋的",
-      "八九十块、整只虾做的",
-      "三十以内、带汤的粉和米线",
-      "十五块以内的甜汤糖水",
-      "一百来块那种清蒸斑鱼，不是两百多的",
-      "只有青椒塞肉这一种，不拼三样的",
-      "蒸的素菜，二十块以内",
-      "不超过十六块的紫菜汤"
+      "123"
     ],
     "negative_by_type": {
       "非餐饮领域": {
@@ -121,13 +106,13 @@
       },
       "业务能力外": {
         "total": 14,
-        "refused": 14,
-        "refusal_rate": 1.0
+        "refused": 13,
+        "refusal_rate": 0.9286
       },
       "菜单中不存在": {
         "total": 17,
-        "refused": 15,
-        "refusal_rate": 0.8824
+        "refused": 14,
+        "refusal_rate": 0.8235
       },
       "prompt注入": {
         "total": 15,
@@ -141,8 +126,8 @@
       },
       "无意义输入": {
         "total": 8,
-        "refused": 6,
-        "refusal_rate": 0.75
+        "refused": 7,
+        "refusal_rate": 0.875
       }
     }
   }
