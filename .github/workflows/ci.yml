@@ -18,6 +18,10 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt
+      - name: Lint
+        run: |
+          pip install ruff==0.17.5
+          ruff check .
       - name: Run pytest
         run: pytest -q
 

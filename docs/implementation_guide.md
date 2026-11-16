@@ -35,7 +35,7 @@
 ## 阶段三：AI 核心 - RAG 与 Agent 实现
 
 ### 1. RAG 混合检索
-*   **向量检索**: 使用 `text-embedding-v4` 将用户问题转化为向量。
+*   **向量检索**: 使用 `text-embedding-v3/v4`（由 `EMBEDDING_MODEL` 指定）将用户问题转化为向量。
 *   **关键词检索**: 引入 `rank_bm25`，提取问题中的菜名关键词。
 *   **重排序 (Rerank)**: 默认调用 DashScope `qwen3-vl-rerank` 对候选菜品精排；也可切到本地 `bge-reranker-v2-m3`（`RERANK_PROVIDER=local`，免额度）。
 

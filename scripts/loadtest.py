@@ -165,6 +165,36 @@ def _stream_summary(metrics, elapsed, error_list):
     }
 
 
+def _plain_summary(args, total_requests, total_elapsed, latencies, errors):
+    """把普通接口压测结果整理成可直接入库的 JSON 结构"""
+    paths = {}
+    for path, values in latencies.items():
+        if not values:
+            paths[path] = {"requests": 0}
+            continue
+        paths[path] = {
+            "requests": len(values),
+            "qps": round(len(values) / total_elapsed, 1) if total_elapsed else 0.0,
+            "mean_ms": round(statistics.mean(values) * 1000, 1),
+            "p50_ms": round(percentile(values, 0.50) * 1000, 1),
+            "p95_ms": round(percentile(values, 0.95) * 1000, 1),
+            "p99_ms": round(percentile(values, 0.99) * 1000, 1),
+            "max_ms": round(max(values) * 1000, 1),
+        }
+    return {
+        "mode": "plain",
+        "base_url": args.base_url,
+        "concurrency": args.concurrency,
+        "duration_s": round(total_elapsed, 2),
+        "total_requests": total_requests,
+        "qps": round(total_requests / total_elapsed, 1) if total_elapsed else 0.0,
+        "errors": len(errors),
+        "paths": paths,
+        "error_samples": errors[:5],
+        "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
 async def run_plain(args):
     async with httpx.AsyncClient(base_url=args.base_url, timeout=args.timeout) as client:
         token = await login(client, args.username, args.password)
@@ -199,6 +229,12 @@ async def run_plain(args):
         )
     if errors:
         print(f"  错误样例: {errors[:5]}")
+
+    if args.json_path:
+        summary = _plain_summary(args, total_requests, total_elapsed, latencies, errors)
+        with open(args.json_path, "w", encoding="utf-8") as fp:
+            json.dump(summary, fp, ensure_ascii=False, indent=2)
+        print(f"结果已写入: {args.json_path}")
 
 
 async def run_stream_level(args, concurrency):
@@ -292,7 +328,8 @@ def main():
                         help="档位之间的间隔秒数，用于避开每分钟限流窗口")
     parser.add_argument("--warmup", type=int, default=1, help="是否先跑 1 次预热（1/0）")
     parser.add_argument("--stream-timeout", type=float, default=180.0, help="流式读取超时（秒）")
-    parser.add_argument("--json", dest="json_path", help="将各档位结果写入 JSON")
+    parser.add_argument("--json", dest="json_path",
+                        help="结果写入 JSON：普通接口为汇总，流式模式为各并发档位")
     args = parser.parse_args()
 
     if args.stream:

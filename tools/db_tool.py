@@ -474,17 +474,19 @@ def get_order(order_no: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def get_all_orders(user_id: Optional[int] = None, limit: int = 10) -> List[Dict[str, Any]]:
-    """查询订单列表（可选按用户过滤）"""
+def get_all_orders(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+    """查询指定用户的订单列表
+
+    user_id 必填：禁止无过滤查询全表，避免越权返回他人订单。
+    """
+    if not user_id:
+        raise ValueError("get_all_orders 必须指定 user_id，禁止无过滤查询")
+
     try:
         with DataBaseConnection() as db:
-            if user_id:
-                query_sql = "SELECT * FROM orders WHERE user_id = %s ORDER BY created_at DESC LIMIT %s"
-                db.cursor.execute(query_sql, (user_id, limit))
-            else:
-                query_sql = "SELECT * FROM orders ORDER BY created_at DESC LIMIT %s"
-                db.cursor.execute(query_sql, (limit,))
-            
+            query_sql = "SELECT * FROM orders WHERE user_id = %s ORDER BY created_at DESC LIMIT %s"
+            db.cursor.execute(query_sql, (user_id, limit))
+
             orders = db.cursor.fetchall()
             for order in orders:
                 if 'items_detail' in order:
@@ -495,6 +497,57 @@ def get_all_orders(user_id: Optional[int] = None, limit: int = 10) -> List[Dict[
         return []
 
 
+SPICE_LEVEL_TEXT = {0: "不辣", 1: "微辣", 2: "中辣", 3: "重辣"}
+
+
+def get_available_menu_rows() -> List[Dict[str, Any]]:
+    """返回在售菜品的结构化数据（供向量入库与检索元数据使用）"""
+    with DataBaseConnection() as db:
+        db.cursor.execute(
+            """
+            SELECT
+                id, dish_name, price, description, category,
+                spice_level, flavor, main_ingredients, cooking_method,
+                is_vegetarian, allergens
+            FROM menu_items
+            WHERE is_available = 1
+            ORDER BY category, dish_name
+            """
+        )
+        return db.cursor.fetchall()
+
+
+def get_menu_items_by_ids(dish_ids: List[int]) -> List[Dict[str, Any]]:
+    """按 ID 批量查询在售菜品（用于校验检索结果是否已下架/改名）"""
+    if not dish_ids:
+        return []
+    placeholders = ", ".join(["%s"] * len(dish_ids))
+    with DataBaseConnection() as db:
+        db.cursor.execute(
+            f"SELECT id, dish_name, price FROM menu_items "
+            f"WHERE id IN ({placeholders}) AND is_available = 1",
+            tuple(dish_ids),
+        )
+        return db.cursor.fetchall()
+
+
+def format_menu_item_text(item: Dict[str, Any]) -> str:
+    """把一行菜品数据拼成用于向量化的文本（字段顺序保持稳定，便于回溯）"""
+    format_spice_level = SPICE_LEVEL_TEXT.get(item.get('spice_level'), "暂无辣度级别")
+    format_is_vegetarian = "是" if item.get('is_vegetarian') else "否"
+    format_description = (item.get('description') or '').strip() or "暂无描述"
+    format_main_ingredients = (item.get('main_ingredients') or '').strip() or "暂无主要食材"
+    format_allergens = (item.get('allergens') or '').strip() or "暂无过敏源"
+
+    return (
+        f"菜品ID:{item['id']}|菜品名称:{item['dish_name']}|价格:¥{item['price']:.2f}"
+        f"|菜品描述:{format_description}|分类:{item['category']}"
+        f"|辣度:{format_spice_level}|口味:{item['flavor']}"
+        f"|主要食材:{format_main_ingredients}|烹饪方法:{item['cooking_method']}"
+        f"|素食:{format_is_vegetarian}|过敏原:{format_allergens}"
+    )
+
+
 def get_all_menu_items() -> str:
     """
     作用：查询menu_items中所有的菜品信息，并且对每一条菜品信息用\n连接，最终形成一个大字符串（向量化）
@@ -502,49 +555,15 @@ def get_all_menu_items() -> str:
     """
 
     try:
-        with DataBaseConnection() as db:
-            # 1.定义SQL语句
-            query_sql = """
-              SELECT 
-                    id, dish_name, price, description, category, 
-                    spice_level, flavor, main_ingredients, cooking_method, 
-                    is_vegetarian, allergens, is_available
-                FROM menu_items 
-                WHERE is_available = 1
-                ORDER BY category, dish_name
-            """
-            # 2.执行SQL语句
-            db.cursor.execute(query_sql)
-            menu_items = db.cursor.fetchall()
+        menu_items = get_available_menu_rows()
 
-            # 3.处理结果
-            if not menu_items:
-                logger.info("当前无可用的菜品信息")
-                return "当前无可用的菜品信息"
+        if not menu_items:
+            logger.info("当前无可用的菜品信息")
+            return "当前无可用的菜品信息"
 
-            menu_items_strings = []
-            for item in menu_items:
-                # 1.格式化辣度级别
-                spice_level_mapping = {0: "不辣", 1: "微辣", 2: "中辣", 3: "重辣"}
-                format_spice_level = spice_level_mapping.get(item.get('spice_level'), "暂无辣度级别")
-                # 2.格式化是否是素食
-                format_is_vegetarian = "是" if item.get('is_vegetarian') else "否"
-                # 3.格式化菜品描述
-                format_description = item.get('description') if item.get('description', '').strip() else "暂无描述"
-                # 4.格式化主要食材
-                format_main_ingredients = item.get('main_ingredients') if item.get('main_ingredients',
-                                                                                   '').strip() else "暂无主要食材"
-                # 5.格式化过敏源
-                format_allergens = item.get('allergens') if item.get('allergens', '').strip() else "暂无过敏源"
-
-                # 拼接菜品结构为字符串
-                menu_item_string = f"菜品ID:{item['id']}|菜品名称:{item['dish_name']}|价格:¥{item['price']:.2f}|菜品描述:{format_description}|分类:{item['category']}|辣度:{format_spice_level}|口味:{item['flavor']}|主要食材:{format_main_ingredients}|烹饪方法:{item['cooking_method']}|素食:{format_is_vegetarian}|过敏原:{format_allergens}"
-                menu_items_strings.append(menu_item_string)
-
-            logger.info(f"查询菜品信息成功，且菜品个数:{len(menu_items_strings)}")
-
-            # 4.返回处理后的结果
-            return "\n".join(menu_items_strings)
+        menu_items_strings = [format_menu_item_text(item) for item in menu_items]
+        logger.info(f"查询菜品信息成功，且菜品个数:{len(menu_items_strings)}")
+        return "\n".join(menu_items_strings)
 
     except Exception as e:
         logger.error(f"查询所有菜品信息字符串结果失败: {e}")
@@ -702,7 +721,7 @@ def test_connection():
         if test_res:
             print(f"测试数据库连接成功，且查询结果是:{test_res}")
         else:
-            print(f"测试数据库连接失败")
+            print("测试数据库连接失败")
 
 
 if __name__ == "__main__":

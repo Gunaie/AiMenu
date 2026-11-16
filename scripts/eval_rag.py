@@ -1,7 +1,7 @@
 """RAG 检索评测脚本。
 
 在标注问答集（data/eval_labels.json）上对比三种检索策略的 Top-K 命中率与 MRR：
-1. 纯向量检索（ChromaDB + text-embedding-v4）
+1. 纯向量检索（ChromaDB + text-embedding-v3/v4，由 EMBEDDING_MODEL 指定）
 2. 向量 + BM25 融合（不重排）
 3. 向量 + BM25 + DashScope Rerank 混合检索
 

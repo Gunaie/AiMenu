@@ -6,6 +6,8 @@ ChromaDB向量数据库工具模块
 """
 
 import os
+import re
+
 import dashscope
 import jieba
 from rank_bm25 import BM25Okapi
@@ -20,6 +22,7 @@ from tools.query_expand import (
     build_search_text,
     expand_query,
     extract_price,
+    parse_diet_constraints,
     parse_price_constraint,
     strip_fillers,
 )
@@ -30,6 +33,47 @@ load_dotenv(override=True)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+_DISH_ID_PATTERN = re.compile(r"菜品ID:(\d+)")
+_DISH_NAME_PATTERN = re.compile(r"菜品名称:([^|]+)")
+
+
+def _candidate_from_metadata(metadata: Dict[str, Any], doc_id: str, source: str) -> Dict[str, Any]:
+    """把 Chroma metadata 转成结构化候选
+
+    新索引直接带 dish_id / dish_name / price / category / spice_level / is_vegetarian；
+    老索引缺字段时从 content 文本回退解析，保证升级期间仍可用。
+    """
+    metadata = metadata or {}
+    content = metadata.get("content", "")
+
+    dish_id = metadata.get("dish_id")
+    if dish_id is None:
+        match = _DISH_ID_PATTERN.search(content)
+        dish_id = match.group(1) if match else str(doc_id)
+
+    dish_name = metadata.get("dish_name")
+    if not dish_name:
+        match = _DISH_NAME_PATTERN.search(content)
+        dish_name = match.group(1).strip() if match else ""
+
+    price = metadata.get("price")
+    if price is None:
+        price = extract_price(content)
+
+    return {
+        "id": str(doc_id),
+        "dish_id": str(dish_id),
+        "dish_name": dish_name,
+        "price": float(price) if price is not None else None,
+        "category": metadata.get("category"),
+        "spice_level": metadata.get("spice_level"),
+        "is_vegetarian": metadata.get("is_vegetarian"),
+        "content": content,
+        "line_number": metadata.get("line_number"),
+        "source": source,
+    }
+
+
 class ChromaVectorDB:
     """ChromaDB向量数据库的操作，支持混合检索与重排序"""
 
@@ -39,12 +83,13 @@ class ChromaVectorDB:
         
         # 配置集合名字、嵌入模型名字、嵌入模型的维度
         self.collection_name = "menu-item-collection"
-        self.embedding_model = "text-embedding-v4"
+        # v4 免费额度耗尽时可切到 v3（1024 维），切换模型后必须重建集合与评测缓存
+        self.embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-v4")
         self.rerank_model = os.getenv("RERANK_MODEL", "qwen3-vl-rerank")  # DashScope 的重排序模型
         # dashscope：云端 API；local：本地 bge-reranker（需安装可选依赖）
         self.rerank_provider = os.getenv("RERANK_PROVIDER", "dashscope").strip().lower()
         self._local_reranker = None
-        self.dimension = 1536
+        self.dimension = int(os.getenv("EMBEDDING_DIM", "1536"))
         self.use_rerank = os.getenv("USE_RERANK", "true").lower() == "true"
         # 是否启用查询改写（同义扩展 + 预算约束解析），消融实验时可关闭
         self.use_rewrite = os.getenv("RETRIEVAL_EXPAND", "true").lower() == "true"
@@ -200,18 +245,17 @@ class ChromaVectorDB:
             return []
 
     def upsert_menu_data(self, menu_data: str = None, clear_existing: bool = True) -> bool:
-        """将文本向量存储到ChromaDB向量数据库"""
-        try:
-            from tools.db_tool import get_all_menu_items
-            if clear_existing:
-                self.clear_index_vectors()
-            
-            menu_item_str = get_all_menu_items()
-            if not self._validate_datasource(menu_item_str):
-                return False
+        """把菜品结构化数据写入 ChromaDB（向量 + 可过滤 metadata）
 
-            embedding_chunks = self._splite_content(menu_item_str)
-            if not embedding_chunks:
+        先在内存里完成全部向量化，确认没有失败项后再清空旧索引：
+        Embedding 额度不足时直接失败退出，避免把可用索引清成半成品。
+        """
+        try:
+            from tools.db_tool import format_menu_item_text, get_available_menu_rows
+
+            menu_items = get_available_menu_rows()
+            if not menu_items:
+                logger.error("没有可入库的菜品数据")
                 return False
 
             if not self.collection and not self.initialize_connection():
@@ -220,24 +264,41 @@ class ChromaVectorDB:
             ids = []
             embeddings = []
             metadatas = []
-            
-            for line_num, chunk in enumerate(embedding_chunks, 1):
+            failed = 0
+
+            for line_num, item in enumerate(menu_items, 1):
+                chunk = format_menu_item_text(item)
                 vector = self._embedding_content(chunk)
                 if not vector:
+                    failed += 1
                     continue
-                
+
                 # 提取关键词用于混合搜索
                 keywords = ",".join(jieba.cut_for_search(chunk))
-                
-                ids.append(str(line_num))
+
+                ids.append(str(item["id"]))
                 embeddings.append(vector)
                 metadatas.append({
                     "content": chunk,
                     "line_number": line_num,
-                    "dish_id": f"菜品ID:{line_num}",
+                    "dish_id": str(item["id"]),
+                    "dish_name": item["dish_name"],
+                    "price": float(item["price"]),
+                    "category": item.get("category") or "",
+                    "spice_level": int(item.get("spice_level") or 0),
+                    "is_vegetarian": bool(item.get("is_vegetarian")),
                     "type": "menu_item",
-                    "keywords": keywords
+                    "keywords": keywords,
                 })
+
+            if failed:
+                logger.error(
+                    f"{failed}/{len(menu_items)} 道菜品向量化失败，保留现有索引不做覆盖"
+                )
+                return False
+
+            if clear_existing:
+                self.clear_index_vectors()
 
             if ids:
                 self.collection.add(
@@ -245,10 +306,10 @@ class ChromaVectorDB:
                     embeddings=embeddings,
                     metadatas=metadatas
                 )
-            
+
             # 更新 BM25 语料库
             self._init_bm25_corpus()
-            
+
             logger.info("切分之后的文本内容成功存储到ChromaDB中...")
             return True
         except Exception as e:
@@ -288,12 +349,7 @@ class ChromaVectorDB:
 
             ranked = sorted(zip(candidates, scores), key=lambda pair: pair[1], reverse=True)[:top_k]
             return [
-                {
-                    "id": candidate['id'],
-                    "score": float(score),
-                    "content": candidate['content'],
-                    "line_number": candidate['line_number'],
-                }
+                {**candidate, "score": float(score)}
                 for candidate, score in ranked
             ]
         except Exception as e:
@@ -333,10 +389,8 @@ class ChromaVectorDB:
                 for item in resp.output.results:
                     idx = item.index
                     reranked_results.append({
-                        "id": candidates[idx]['id'],
+                        **candidates[idx],
                         "score": float(item.relevance_score),
-                        "content": candidates[idx]['content'],
-                        "line_number": candidates[idx]['line_number']
                     })
                 return reranked_results
             else:
@@ -387,7 +441,9 @@ class ChromaVectorDB:
         lower, upper = price_range
         filtered = []
         for candidate in candidates:
-            price = extract_price(candidate.get('content', ''))
+            price = candidate.get('price')
+            if price is None:
+                price = extract_price(candidate.get('content', ''))
             if price is not None and lower <= price <= upper:
                 filtered.append(candidate)
         if not filtered:
@@ -395,8 +451,31 @@ class ChromaVectorDB:
             return candidates
         return filtered
 
+    @staticmethod
+    def _filter_by_diet(candidates: List[Dict[str, Any]],
+                        constraints: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """按辣度/素食约束硬过滤（优先用 metadata，老索引缺字段时不过滤该条）"""
+        if not constraints:
+            return candidates
+
+        max_spice = constraints.get("max_spice")
+        vegetarian_only = constraints.get("vegetarian")
+        filtered = []
+        for candidate in candidates:
+            spice_level = candidate.get("spice_level")
+            if max_spice is not None and spice_level is not None and int(spice_level) > int(max_spice):
+                continue
+            if vegetarian_only and candidate.get("is_vegetarian") is False:
+                continue
+            filtered.append(candidate)
+
+        if not filtered:
+            logger.info(f"饮食约束 {constraints} 未命中任何菜品，返回空结果")
+        return filtered
+
     def _collect_candidates(self, query: str, expand: bool = False,
-                            price_range: Optional[Tuple[float, float]] = None) -> List[Dict[str, Any]]:
+                            price_range: Optional[Tuple[float, float]] = None,
+                            diet_constraints: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """向量 + BM25 双路召回并做 RRF 融合
 
         expand=True 时用同义扩展后的文本做向量召回，并按 0.5 权重叠加扩展词的 BM25 分数，
@@ -415,12 +494,9 @@ class ChromaVectorDB:
             if vector_results['ids'] and vector_results['ids'][0]:
                 for i in range(len(vector_results['ids'][0])):
                     metadata = vector_results['metadatas'][0][i]
-                    vector_candidates.append({
-                        "id": vector_results['ids'][0][i],
-                        "content": metadata['content'],
-                        "line_number": metadata['line_number'],
-                        "source": "vector"
-                    })
+                    vector_candidates.append(
+                        _candidate_from_metadata(metadata, vector_results['ids'][0][i], "vector")
+                    )
 
         # 2. BM25 搜索 (Top 10 候选)
         bm25_candidates = []
@@ -440,19 +516,18 @@ class ChromaVectorDB:
             for idx in top_indices:
                 if scores[idx] > 0:
                     metadata = self.corpus_metadatas[idx]
-                    bm25_candidates.append({
-                        "id": str(metadata['line_number']),
-                        "content": self.corpus[idx],
-                        "line_number": metadata['line_number'],
-                        "source": "bm25"
-                    })
+                    bm25_candidates.append(
+                        _candidate_from_metadata(metadata, metadata.get("dish_id", idx), "bm25")
+                    )
 
         # 3. 合并去重 + RRF 融合排序
         candidates = self._fuse_candidates(vector_candidates, bm25_candidates)
 
-        # 4. 预算约束过滤
+        # 4. 预算与饮食约束过滤（基于 metadata，而非从文本里正则抠价格）
         if price_range:
             candidates = self._filter_by_price(candidates, price_range)
+        if diet_constraints:
+            candidates = self._filter_by_diet(candidates, diet_constraints)
         return candidates
 
     def _should_rewrite(self, results: List[Dict[str, Any]]) -> bool:
@@ -462,11 +537,14 @@ class ChromaVectorDB:
         top_score = max((item.get("score", 0.0) for item in results), default=0.0)
         return top_score < self.rewrite_score_threshold
 
-    def hybrid_search(self, query: str, top_k: int = 2) -> List[Dict[str, Any]]:
+    def hybrid_search(self, query: str, top_k: int = 2,
+                      price_range: Optional[Tuple[float, float]] = None,
+                      diet_constraints: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """高级混合检索：向量检索 + BM25关键词检索 + Rerank重排序
 
         改写策略：
         - 命中预算约束（"四十块以内"）时先按价格过滤候选；
+        - 会话槽位传入的 price_range / diet_constraints 优先级高于 query 解析结果；
         - 首轮 Rerank 置信度低于阈值时，用同义扩展再做一次召回，合并候选池后重排；
         - Rerank 始终以用户原始 query 为准，改写只用于扩大召回。
         """
@@ -474,8 +552,17 @@ class ChromaVectorDB:
             if not self.collection and not self.initialize_connection():
                 return []
 
-            price_range = parse_price_constraint(query) if self.use_rewrite else None
-            candidates = self._collect_candidates(query, price_range=price_range)
+            if self.use_rewrite:
+                price_range = price_range or parse_price_constraint(query)
+                query_diet = parse_diet_constraints(query)
+            else:
+                query_diet = {}
+            # 会话槽位优先：模型/用户本轮显式给出的约束覆盖 query 文本解析
+            merged_diet = {**query_diet, **(diet_constraints or {})}
+
+            candidates = self._collect_candidates(
+                query, price_range=price_range, diet_constraints=merged_diet
+            )
             if not candidates:
                 return []
 
@@ -487,7 +574,10 @@ class ChromaVectorDB:
 
             if self.use_rewrite and self._should_rewrite(results) and expand_query(query):
                 expanded_candidates = self._collect_candidates(
-                    query, expand=True, price_range=price_range
+                    query,
+                    expand=True,
+                    price_range=price_range,
+                    diet_constraints=merged_diet,
                 )
                 known = {item['content'] for item in candidates}
                 additions = [item for item in expanded_candidates if item['content'] not in known]
@@ -523,28 +613,49 @@ def _judge_answerable(scores: List[float]) -> Optional[bool]:
     return max(scores) >= chroma_db.min_relevance_score
 
 
-def search_menu_items_with_ids(query: str, top_k: int = 2) -> Dict[str, Any]:
-    match_result = chroma_db.hybrid_search(query=query, top_k=top_k)
+def search_menu_items_with_ids(query: str, top_k: int = 2,
+                               max_spice: Optional[int] = None,
+                               max_price: Optional[float] = None,
+                               vegetarian: Optional[bool] = None) -> Dict[str, Any]:
+    """混合检索并返回结构化菜品（Agent 直接消费 dish_id，不再从回复文本反推）
+
+    显式传入的辣度/预算/素食约束来自会话槽位，优先级高于 query 文本解析。
+    """
+    diet_constraints: Dict[str, Any] = {}
+    if max_spice is not None:
+        diet_constraints["max_spice"] = max_spice
+    if vegetarian is not None:
+        diet_constraints["vegetarian"] = vegetarian
+    price_range = (0.0, float(max_price)) if max_price is not None else None
+
+    match_result = chroma_db.hybrid_search(
+        query=query,
+        top_k=top_k,
+        price_range=price_range,
+        diet_constraints=diet_constraints,
+    )
     if not match_result:
         return {
             "contents": [],
+            "items": [],
             "ids": [],
             "scores": [],
             "answerable": _judge_answerable([]),
             "top_score": 0.0,
         }
 
-    ids = []
-    import re
+    items = []
     for item in match_result:
-        content = item['content']
-        re_match = re.search(r"菜品ID:(\d+)", content)
-        dish_id = re_match.group(1) if re_match else item['id']
-        ids.append(dish_id)
+        candidate = _candidate_from_metadata(item, item.get("id", ""), item.get("source", "hybrid"))
+        # 保留重排分数，其余结构化字段以候选自身为准
+        candidate["score"] = item.get("score", 0.0)
+        items.append(candidate)
 
-    scores = [item.get('score', 0.0) for item in match_result]
+    ids = [item["dish_id"] for item in items]
+    scores = [item["score"] for item in items]
     return {
-        "contents": [item['content'] for item in match_result],
+        "contents": [item["content"] for item in items],
+        "items": items,
         "ids": ids,
         "scores": scores,
         "answerable": _judge_answerable(scores),

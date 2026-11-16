@@ -67,7 +67,7 @@ def test_submit_order_recalculates_amount_server_side(authed_user, monkeypatch):
         "tools.db_tool.create_order",
         lambda order_data: captured.update(order_data) or "ORD123",
     )
-    monkeypatch.setattr("api.main.send_notification", lambda order_no: None)
+    monkeypatch.setattr("api.deps.send_notification", lambda order_no: None)
 
     response = client.post(
         "/order/submit",
@@ -139,8 +139,8 @@ def test_delivery_failure_returns_full_payload(authed_user, monkeypatch):
 async def test_chat_rate_limit_returns_429(monkeypatch):
     from api.main import get_chat_user
 
-    monkeypatch.setattr("api.main.CHAT_RATE_LIMIT_PER_MINUTE", 2)
-    monkeypatch.setattr("api.main.cache.incr_with_ttl", lambda key, expire=70: 3)
+    monkeypatch.setattr("api.deps.CHAT_RATE_LIMIT_PER_MINUTE", 2)
+    monkeypatch.setattr("api.deps.cache.incr_with_ttl", lambda key, expire=70: 3)
 
     with pytest.raises(HTTPException) as exc_info:
         await get_chat_user(USER)
@@ -152,7 +152,7 @@ async def test_chat_rate_limit_returns_429(monkeypatch):
 async def test_chat_rate_limit_fails_open_when_redis_down(monkeypatch):
     from api.main import get_chat_user
 
-    monkeypatch.setattr("api.main.CHAT_RATE_LIMIT_PER_MINUTE", 2)
-    monkeypatch.setattr("api.main.cache.incr_with_ttl", lambda key, expire=70: None)
+    monkeypatch.setattr("api.deps.CHAT_RATE_LIMIT_PER_MINUTE", 2)
+    monkeypatch.setattr("api.deps.cache.incr_with_ttl", lambda key, expire=70: None)
 
     assert await get_chat_user(USER) == USER

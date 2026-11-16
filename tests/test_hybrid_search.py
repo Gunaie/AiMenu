@@ -113,9 +113,11 @@ def test_local_rerank_falls_back_on_error(vector_db):
 def test_search_menu_items_with_ids_parses_dish_id(monkeypatch):
     monkeypatch.setattr(
         "tools.chroma_tool.chroma_db.hybrid_search",
-        lambda query, top_k=3: [
+        lambda query, top_k=3, price_range=None, diet_constraints=None: [
             {
                 "id": "1",
+                "dish_id": "4",
+                "dish_name": "回锅肉",
                 "content": "菜品ID:4|菜品名称:回锅肉|价格:¥45.00",
                 "score": 0.9,
                 "line_number": 4,
@@ -126,4 +128,6 @@ def test_search_menu_items_with_ids_parses_dish_id(monkeypatch):
     result = search_menu_items_with_ids("回锅肉", top_k=1)
 
     assert result["ids"] == ["4"]
+    assert result["items"][0]["dish_name"] == "回锅肉"
+    assert result["items"][0]["dish_id"] == "4"
     assert "回锅肉" in result["contents"][0]

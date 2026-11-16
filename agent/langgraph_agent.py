@@ -2,7 +2,8 @@ import os
 import json
 import logging
 import re
-from typing import Annotated, TypedDict, List, Dict, Any, Union, Optional
+import time
+from typing import Annotated, TypedDict, List, Dict, Any, Optional
 
 from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableConfig
@@ -14,12 +15,18 @@ from langgraph.prebuilt import ToolNode
 # 导入自定义工具
 from agent.tools import restaurant_tools
 from tools.observability import record_usage
+from tools.query_expand import update_session_constraints
 from agent.session_memory import RedisSessionMemory
 
 logger = logging.getLogger(__name__)
 
 # 会话级槽位名：记录本会话已确认过的配送地址，供后续「那配送费多少」这类追问复用
 DELIVERY_ADDRESS_SLOT = "delivery_address"
+# 会话级槽位名：记录辣度/预算/素食约束，跨轮沿用，检索前做硬过滤
+DIET_CONSTRAINTS_SLOT = "diet_constraints"
+
+# Agent 最大迭代次数（agent ↔ tools 循环），防模型陷入工具重复调用死循环
+MAX_AGENT_ITERATIONS = 12
 
 # 确定性输入护栏：在进入 LLM 之前拦掉两类请求，不依赖模型自觉
 # 1) 只有标点/空白，没有任何文字或数字（模型容易自说自话编菜品）
@@ -39,6 +46,8 @@ class AgentState(TypedDict):
     final_response: str   # 最终聚合的回复内容
     user_info: Optional[Dict[str, Any]] # 当前用户信息
     guard_blocked: bool   # 是否被确定性输入护栏拦截（拦截时不进入 LLM/工具）
+    constraints: Dict[str, Any]  # 会话级用餐约束：max_spice / max_price / vegetarian
+    iteration_count: int  # agent ↔ tools 循环计数，防死循环
 
 class SmartRestaurantGraph:
     def __init__(self, model_name: Optional[str] = None):
@@ -155,9 +164,18 @@ class SmartRestaurantGraph:
 
 
     def should_continue(self, state: AgentState):
-        """判断是否需要继续调用工具"""
+        """判断是否需要继续调用工具
+
+        防死循环：agent ↔ tools 循环超过 MAX_AGENT_ITERATIONS 次时强制结束，
+        让 LLM 基于已有结果生成最终回复。
+        """
         messages = state['messages']
         last_message = messages[-1]
+        # 硬上限：超过迭代次数，强制停止工具调用
+        iteration = state.get("iteration_count", 0)
+        if iteration >= MAX_AGENT_ITERATIONS:
+            logger.warning("Agent 迭代次数达到上限 %d，强制停止工具调用", MAX_AGENT_ITERATIONS)
+            return "end"
         # 如果最后一条消息包含工具调用，则继续
         if last_message.tool_calls:
             return "continue"
@@ -217,8 +235,61 @@ class SmartRestaurantGraph:
             messages = messages[:-1] + [last.model_copy(update={"tool_calls": patched})]
         return messages, seen_address
 
+    @staticmethod
+    def _latest_human_text(messages: List[BaseMessage]) -> str:
+        """取最近一条用户消息的文本，用于解析本轮约束"""
+        for message in reversed(messages or []):
+            if isinstance(message, HumanMessage):
+                return message.content if isinstance(message.content, str) else ""
+        return ""
+
+    @staticmethod
+    def _patch_search_calls(messages: List[BaseMessage],
+                            constraints: Dict[str, Any]) -> List[BaseMessage]:
+        """把会话约束强制写进 search_menu 参数
+
+        约束来源是会话槽位（Redis），比模型自己传参更可信；模型漏传或传错都会被覆盖。
+        """
+        if not constraints or not messages:
+            return messages
+        last = messages[-1]
+        if not getattr(last, "tool_calls", None):
+            return messages
+
+        allowed_keys = ("max_spice", "max_price", "vegetarian")
+        patched = []
+        changed = False
+        for call in last.tool_calls:
+            if call.get("name") == "search_menu":
+                args = dict(call.get("args") or {})
+                for key in allowed_keys:
+                    value = constraints.get(key)
+                    if value is not None and args.get(key) != value:
+                        args[key] = value
+                        changed = True
+                call = {**call, "args": args}
+            patched.append(call)
+        if not changed:
+            return messages
+        return messages[:-1] + [last.model_copy(update={"tool_calls": patched})]
+
+    @staticmethod
+    def _describe_constraints(constraints: Dict[str, Any]) -> str:
+        """把约束槽转成给模型看的自然语言提示"""
+        if not constraints:
+            return ""
+        spice_labels = {0: "不辣", 1: "微辣", 2: "中辣", 3: "重辣"}
+        parts = []
+        if constraints.get("max_spice") is not None:
+            parts.append(f"辣度≤{spice_labels.get(int(constraints['max_spice']), constraints['max_spice'])}")
+        if constraints.get("max_price") is not None:
+            parts.append(f"预算≤¥{float(constraints['max_price']):g}")
+        if constraints.get("vegetarian"):
+            parts.append("仅素食")
+        return "；".join(parts)
+
     async def _run_tools(self, state: AgentState, config: RunnableConfig):
-        """工具节点：补齐当前用户身份与上一轮已确认的配送地址"""
+        """工具节点：补齐身份、配送地址与用餐约束"""
         user_info = state.get("user_info") or {}
         user_id = user_info.get("id")
         session_id = (config or {}).get("configurable", {}).get("thread_id")
@@ -226,14 +297,146 @@ class SmartRestaurantGraph:
             session_id, DELIVERY_ADDRESS_SLOT, user_id=user_id
         )
 
+        # 约束槽：本轮明确的辣度/预算/素食覆盖旧值，未提及则沿用；支持显式撤销
+        query = self._latest_human_text(state.get("messages", []))
+        previous_constraints = self.memory_store.get_slot(
+            session_id, DIET_CONSTRAINTS_SLOT, user_id=user_id
+        ) or {}
+        constraints = update_session_constraints(previous_constraints, query)
+        if constraints != previous_constraints:
+            self.memory_store.set_slot(
+                session_id, DIET_CONSTRAINTS_SLOT, constraints, user_id=user_id
+            )
+
         messages, address = self._patch_delivery_calls(state["messages"], fallback_address)
         messages = self._inject_user_id(messages, user_id)
+        messages = self._patch_search_calls(messages, constraints)
         if address:
             # 本轮明确说了地点，更新槽位；下一轮追问直接复用
             self.memory_store.set_slot(session_id, DELIVERY_ADDRESS_SLOT, address, user_id=user_id)
         # 必须透传 config：LangGraph 新版会校验节点运行所需的 config key，
         # 不传会直接抛 "Missing required config key"。
-        return await self.tool_node.ainvoke({"messages": messages}, config=config)
+        result = await self.tool_node.ainvoke({"messages": messages}, config=config)
+        result["constraints"] = constraints
+        return result
+
+    # 约束词：只出现这些词的追问被视为「约束变更」，需要强制触发 search_menu
+    # 覆盖：新增约束 + 撤销约束（不用素了/取消预算等）
+    CONSTRAINT_ONLY_PATTERN = re.compile(
+        r"^(?:(?:都?不要?|别|不要|来|来点?|有|要|再来|再给|多来点?|不再|不用|别放|去掉|取消|"
+        r"随便)?(?:辣的|辣的东西|不辣|不要辣|去掉辣|别放辣|微辣|中辣|重辣|特辣|最辣|超辣|"
+        r"吃素|全素|纯素|只要素的|不吃肉|不要肉|不用肉|别放肉|不要荤|不用素了|去掉素|取消素|不限制素|不限素|"
+        r"便宜|再便宜点|更便宜|便宜点|最低价|最低|少花钱|取消预算|不限预算|不限制预算|"
+        r"清淡|口味淡点|淡一点|随便来|招牌菜|什么都行|都可以|"
+        r"预算.{0,8}|不超过|以内|以下|"
+        r"不要.{1,4}(?:辣|肉|素|鱼|虾|海鲜|内脏|辣的|炸的|烤的|肥的)"
+        r")[，。,.!！?？、]*)$"
+    )
+    # 继续请求：多推荐/再来/再给 → 承接上一主题，视为约束变更追问
+    CONTINUATION_PATTERN = re.compile(
+        r"^(?:再多|再给|再来|再选|再找|再帮)"
+        r"(?:.+)?(?:道|个|些|点|几个|两个|三个|几道菜|几样)"
+        r"(?:吧|呀|哦|哈)?[，。,.!！?？、]*$"
+    )
+    # 含这些词时认为有新查询对象，不应判定为约束变更（不含孤立"推荐"，"推荐几个"已由 CONTINUATION 匹配）
+    SUBJECT_MARKERS = re.compile(
+        r"(?:川菜|粤菜|湘菜|鲁菜|淮扬菜|浙菜|闽菜|徽菜|东北菜|家常菜|"
+        r"烧烤|火锅|串串|早茶|点心|甜品|甜点|汤|面|饭|粥|包子|饺子|面条|"
+        r"鱼|虾|蟹|鸡|鸭|鹅|牛|羊|猪|肉|蛋|豆腐|菌|菇|笋|笋干|"
+        r"菜|小吃|主食|饮品|茶|酒|咖啡|奶茶|果汁|甜品|甜点|蛋糕|"
+        r"来.{1,3}道|上.{1,3}道|有什么|有啥|哪些|哪个|种类|菜谱|菜名|菜单)"
+    )
+    MAX_SUBJECT_RECALL = 3  # 从前几轮历史里找最近的查询主题，上限 3 个
+
+    @classmethod
+    def _is_constraint_only_followup(cls, query: str, messages: List[BaseMessage]) -> bool:
+        """判定当前轮是否是「只改约束、没有新查询对象」的追问
+
+        检查顺序：
+        1. SUBJECT_MARKERS 命中 → 有明确新查询对象，交 LLM 自行处理（不强制注入）
+        2. CONTINUATION_PATTERN 命中 → 继续上一主题的请求，视为约束变更追问
+        3. CONSTRAINT_ONLY_PATTERN 命中 → 纯约束变更（新增或撤销）
+
+        例子：
+          ✓ 「都不要辣的」（承接上一轮川菜主题）
+          ✓ 「预算 40 以内」（承接上一轮推荐主题）
+          ✓ 「再多推荐两道」（继续上一主题）
+          ✓ 「不用素了，随便来几个招牌菜」（撤销素食约束）
+          ✗ 「有什么川菜」（有明确查询对象）
+          ✗ 「川菜都不要辣的」（同时有主题和约束，应正常进入 LLM）
+        """
+        text = (query or "").strip()
+        if not text:
+            return False
+        # 有明确新查询对象 → 不走强制注入
+        if cls.SUBJECT_MARKERS.search(text):
+            return False
+        # 继续上一主题的请求 → 强制注入
+        if cls.CONTINUATION_PATTERN.search(text):
+            return True
+        # 纯约束变更（新增或撤销）→ 强制注入
+        return bool(cls.CONSTRAINT_ONLY_PATTERN.search(text))
+
+    @staticmethod
+    def _extract_prior_subjects(messages: List[BaseMessage]) -> List[str]:
+        """从历史 HumanMessage / search_menu 调用中提取上一轮锁定的主题（菜系/食材）
+
+        返回最多 MAX_SUBJECT_RECALL 个，按出现顺序；找不到就返回空。
+        """
+        subjects: List[str] = []
+        seen = set()
+        # 先扫 search_menu 的 tool_call 参数（最可靠）
+        for message in reversed(messages):
+            if not isinstance(message, AIMessage) or not getattr(message, "tool_calls", None):
+                continue
+            for call in message.tool_calls:
+                if call.get("name") != "search_menu":
+                    continue
+                query = (call.get("args") or {}).get("query") or ""
+                # query 一般是上一轮 HumanMessage 的原样复制
+                if query and query not in seen:
+                    seen.add(query)
+                    subjects.append(query)
+                    if len(subjects) >= SmartRestaurantGraph.MAX_SUBJECT_RECALL:
+                        return subjects
+        # 兜底：取最近一轮 HumanMessage（约束变更的上一轮）
+        for message in reversed(messages):
+            if isinstance(message, HumanMessage):
+                text = (message.content if isinstance(message.content, str) else "").strip()
+                if text and text not in seen:
+                    # 只保留含明确查询对象的轮次（约束变更轮本身会被 SUBJECT_MARKERS 挡住）
+                    if SmartRestaurantGraph.SUBJECT_MARKERS.search(text):
+                        subjects.append(text)
+                        break
+        return subjects
+
+    @staticmethod
+    def _build_forced_search_tool_call(subjects: List[str]) -> Dict[str, Any]:
+        """为约束变更追问构造强制 search_menu 工具调用"""
+        query = subjects[0] if subjects else "推荐几个菜"
+        # 工具 id 用固定前缀避免与 LLM 可能同时发出的调用冲突
+        return {
+            "name": "search_menu",
+            "args": {"query": query},
+            "id": f"forced-search-{int(time.time() * 1000)}",
+            "type": "tool_call",
+        }
+
+    @staticmethod
+    def _has_recent_search_menu(messages: List[BaseMessage]) -> bool:
+        """检查最近一轮 AIMessage 是否已经包含 search_menu tool_call
+
+        防强制注入无限循环：tools 节点刚执行完 search_menu 后不应再注入。
+        只看最近一条 AIMessage（LangGraph 每次 call_model 结束后 messages 末尾是刚生成的 AIMessage）。
+        """
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage):
+                tool_calls = getattr(msg, "tool_calls", None) or []
+                for call in tool_calls:
+                    if call.get("name") == "search_menu":
+                        return True
+                break  # 只看最近一条 AIMessage
+        return False
 
     async def call_model(self, state: AgentState, config: RunnableConfig):
         """调用 LLM 决策或生成回复"""
@@ -259,10 +462,23 @@ class SmartRestaurantGraph:
                 f"请直接以这个地址调用 check_delivery，不要重复询问地址。"
             )
 
+        # 本会话已确认的辣度/预算/素食约束：跨轮沿用，检索前由系统硬过滤
+        constraints = state.get("constraints") or self.memory_store.get_slot(
+            session_id, DIET_CONSTRAINTS_SLOT, user_id=(user_info or {}).get("id")
+        ) or {}
+        constraint_text = self._describe_constraints(constraints)
+        constraint_slot = ""
+        if constraint_text:
+            constraint_slot = (
+                f"\n【本会话已确认的用餐约束】：{constraint_text}"
+                f"\n客官本轮未明确修改时，直接沿用这些约束，不要重复询问；"
+                f"调用 search_menu 时系统会自动带入这些条件。"
+            )
+
         # 系统提示词：定义角色和行为规范
         system_prompt = f"""你是一个亲切专业的智能餐厅助手（小二）。
 任务：利用提供的【工具】获取信息，并以热情、地道的口吻回答客官的问题。
-{user_context}{address_slot}
+{user_context}{address_slot}{constraint_slot}
 
 准则：
 1. **角色定位**：自称“小二”，称呼用户为“客官”。语气亲切，适当使用“好嘞”、“客官您慢看”等表达。
@@ -282,6 +498,9 @@ class SmartRestaurantGraph:
 7. **无答案拒答**：`search_menu` 返回 `answerable: false` 时，说明菜单中没有相关菜品（例如客官问帝王蟹、松露），必须如实说明"小店暂时没有这道菜"，可推荐相近菜品，绝不能编造菜品或硬推不相关的结果。
 8. **权限边界**：只能查询当前登录客官本人的订单。若客官索要他人或"全部用户"的订单、账号密码、手机号等隐私信息，
    必须明确拒绝，且不要调用 `query_order`，更不能编造数据。
+9. **工具调用闭环（极其重要）**：拿到 `search_menu` 的 ToolMessage 结果后，**必须基于结果直接生成回复**，
+   绝不能再次调用同一个 `search_menu` 查询。同理，`query_order` 和 `check_delivery` 也一样——
+   工具返回一次结果就够了，不要重复调用。
 """
         
         # 针对 Tool Calling 注入 user_id
@@ -297,24 +516,35 @@ class SmartRestaurantGraph:
         # 调用 LLM（带工具绑定）
         response = await self.llm_with_tools.ainvoke(messages, config=config)
         
-        # 提取推荐的菜品 ID
-        recommended_ids = []
+        # 提取推荐的菜品 ID：直接消费工具返回的结构化 menu_ids/items，
+        # 不再用正则从模型回复里反推菜名再回查文本。
+        recommended_ids: List[str] = []
         if not response.tool_calls:
+            reply = response.content or ""
             for msg in state['messages']:
-                if isinstance(msg, ToolMessage) and "search_menu" in msg.name:
-                    try:
-                        data = json.loads(msg.content)
-                        if data.get("success") and data.get("contents"):
-                            for i, content in enumerate(data["contents"]):
-                                name_match = re.search(r"菜品名称:([^|]+)", content)
-                                if name_match:
-                                    dish_name = name_match.group(1).strip()
-                                    if dish_name in response.content:
-                                        if i < len(data.get("menu_ids", [])):
-                                            recommended_ids.append(str(data["menu_ids"][i]))
-                    except (json.JSONDecodeError, TypeError, AttributeError, IndexError) as parse_err:
-                        logger.debug(f"解析工具返回的菜品信息失败: {parse_err}")
-                        continue
+                if not isinstance(msg, ToolMessage) or "search_menu" not in (msg.name or ""):
+                    continue
+                try:
+                    data = json.loads(msg.content)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not (data.get("success") and data.get("contents")):
+                    continue
+
+                items = data.get("items") or []
+                menu_ids = data.get("menu_ids") or []
+                if items:
+                    for index, item in enumerate(items):
+                        dish_id = item.get("dish_id") or (
+                            menu_ids[index] if index < len(menu_ids) else None
+                        )
+                        dish_name = item.get("dish_name")
+                        if dish_id and dish_name and dish_name in reply:
+                            recommended_ids.append(str(dish_id))
+                else:
+                    # 兼容旧版工具返回：只有 menu_ids，没有结构化 items
+                    recommended_ids.extend(str(dish_id) for dish_id in menu_ids)
+            recommended_ids = list(dict.fromkeys(recommended_ids))
         
         logger.info(f"LangGraph Node: agent - Done, duration: {time.time()-start_t:.4f}s")
         usage = getattr(response, "usage_metadata", None) or {}
@@ -327,11 +557,52 @@ class SmartRestaurantGraph:
                 usage.get("output_tokens"),
                 usage.get("total_tokens"),
             )
+        # 强制兜底：LLM 对「只改约束、无新查询对象」的追问容易跳过 search_menu，
+        # 直接凭上一轮结果生成回复。命中这类请求时，若 LLM 没调 search_menu，
+        # 强制注入一个 search_menu 工具调用（主题取上一轮、约束仍由 tools 节点硬过滤）。
+        # 防无限循环：如果最近一轮 AIMessage 已经有 search_menu 调用，说明 tools 节点刚执行完，不再注入。
+        new_constraints = constraints  # 默认不变；强制注入前可能更新
+        if (not response.tool_calls
+                and not state.get("guard_blocked")
+                and not self._has_recent_search_menu(state.get("messages", []))):
+            current_query = self._latest_human_text(state.get("messages", []))
+            if self._is_constraint_only_followup(current_query, state.get("messages", [])):
+                prior_subjects = self._extract_prior_subjects(state.get("messages", []))
+
+                # 强制注入前先手动更新槽位——因为 LLM 没调工具，_run_tools 不会执行，
+                # 里面的 update_session_constraints 也不会被调。撤销约束（不用素了/取消预算）
+                # 这类槽位变更必须现在就写进去，否则 search_menu 会带着旧约束查。
+                slot_session_id = (config or {}).get("configurable", {}).get("thread_id")
+                slot_user_id = (user_info or {}).get("id")
+                updated = update_session_constraints(constraints, current_query)
+                if updated != constraints:
+                    self.memory_store.set_slot(
+                        slot_session_id, DIET_CONSTRAINTS_SLOT, updated, user_id=slot_user_id
+                    )
+                    new_constraints = updated
+                    logger.info(
+                        "强制注入前更新约束槽位：「%s」%s → %s",
+                        current_query, constraints, updated,
+                    )
+
+                forced_call = self._build_forced_search_tool_call(prior_subjects)
+                logger.info(
+                    "强制注入 search_menu：约束变更追问「%s」，锁定主题=%s",
+                    current_query, prior_subjects,
+                )
+                # 强制调用时清空 content + 叠加 tool_calls，让 tools 执行后由下一轮 agent 统一生成
+                response = response.model_copy(update={
+                    "content": "",
+                    "tool_calls": (response.tool_calls or []) + [forced_call],
+                })
+
         return {
             "messages": [response],
             "menu_ids": recommended_ids,
             "final_response": response.content if not response.tool_calls else "",
-            "user_info": user_info
+            "user_info": user_info,
+            "constraints": new_constraints,
+            "iteration_count": state.get("iteration_count", 0) + 1,
         }
 
     async def astream_run(self, user_query: str, session_id: str = "default", user_info: Dict[str, Any] = None):
@@ -343,7 +614,9 @@ class SmartRestaurantGraph:
         history = self.memory_store.load(session_id, user_id=user_id)
         initial_state = {
             "messages": history + [HumanMessage(content=user_query)],
-            "user_info": user_info
+            "user_info": user_info,
+            "constraints": {},
+            "iteration_count": 0,
         }
         
         logger.info(f"LangGraph (Tool-Calling) astream_run start: {user_query} (user: {user_info.get('username') if user_info else 'Guest'}, history: {len(history)})")
@@ -418,7 +691,9 @@ class SmartRestaurantGraph:
         history = self.memory_store.load(session_id, user_id=user_id)
         initial_state = {
             "messages": history + [HumanMessage(content=user_query)],
-            "user_info": user_info
+            "user_info": user_info,
+            "constraints": {},
+            "iteration_count": 0,
         }
         
         final_state = await self.app.ainvoke(

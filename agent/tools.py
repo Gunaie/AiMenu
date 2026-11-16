@@ -2,32 +2,100 @@ import logging
 from typing import Dict, Any, List, Optional
 from langchain_core.tools import tool
 from tools.chroma_tool import search_menu_items_with_ids
-from tools.amap_tool import check_delivery_range as amap_check, PathInputModel
-from tools.db_tool import get_order, DataBaseConnection
+from tools.amap_tool import check_delivery_range as amap_check
+from tools.db_tool import DataBaseConnection, get_menu_items_by_ids
 
 logger = logging.getLogger(__name__)
 
+
+def _verify_menu_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """菜名存在性校验：以数据库为准核对检索出的 dish_id 与菜名
+
+    向量索引可能落后于菜单更新（下架/改名/删档），这里过滤掉已不存在的菜品，
+    并用数据库里的标准菜名覆盖，避免模型推荐不存在的菜。
+    数据库不可用时 fail-open，不影响正常检索。
+    """
+    dish_ids = []
+    for item in items:
+        try:
+            dish_ids.append(int(item.get("dish_id")))
+        except (TypeError, ValueError):
+            continue
+    if not dish_ids:
+        return items
+
+    try:
+        rows = get_menu_items_by_ids(dish_ids)
+    except Exception as exc:
+        logger.warning(f"菜名存在性校验失败，跳过校验: {exc}")
+        return items
+
+    available = {int(row["id"]): row["dish_name"] for row in rows}
+    verified = []
+    for item in items:
+        try:
+            dish_id = int(item.get("dish_id"))
+        except (TypeError, ValueError):
+            continue
+        if dish_id not in available:
+            logger.info(f"过滤已下架/不存在的菜品: dish_id={dish_id}")
+            continue
+        canonical_name = available[dish_id]
+        if item.get("dish_name") and item["dish_name"] != canonical_name:
+            logger.info(f"菜名以数据库为准: {item['dish_name']} -> {canonical_name}")
+        verified.append({**item, "dish_name": canonical_name})
+    return verified
+
+
 @tool
-def search_menu(query: str) -> Dict[str, Any]:
+def search_menu(query: str, max_spice: Optional[int] = None,
+                max_price: Optional[float] = None, vegetarian: Optional[bool] = None) -> Dict[str, Any]:
     """
     搜索餐厅的菜品信息。
     当你需要了解菜品的特色、口感、价格、分类（如川菜、浙菜）或推荐菜品时，请使用此工具。
     支持模糊搜索和语义搜索。
+    max_spice/max_price/vegetarian 是本会话已确认的辣度、预算、素食约束，
+    由系统自动注入；客官本轮没有明确提出新约束时不要自行改写。
     """
     try:
-        logger.info(f"AI Tool Calling: search_menu for '{query}'")
-        result = search_menu_items_with_ids(query, top_k=5)
+        logger.info(f"AI Tool Calling: search_menu for '{query}' "
+                    f"(max_spice={max_spice}, max_price={max_price}, vegetarian={vegetarian})")
+        result = search_menu_items_with_ids(
+            query,
+            top_k=5,
+            max_spice=max_spice,
+            max_price=max_price,
+            vegetarian=vegetarian,
+        )
+        original_items = result.get("items") or []
+        items = _verify_menu_items(original_items)
+
+        if items:
+            contents = [item.get("content", "") for item in items]
+        elif original_items:
+            # 检索有结果但全部不存在于数据库：视为无答案，避免推荐幽灵菜品
+            contents = []
+        else:
+            contents = result.get("contents", [])
+
+        answerable = result.get("answerable")
+        if original_items and not items:
+            answerable = False
+
         return {
             "success": True,
-            "contents": result.get("contents", []),
-            "menu_ids": result.get("ids", []),
+            "contents": contents,
+            # 结构化条目：dish_id / dish_name / price / category / spice_level / is_vegetarian
+            "items": items,
+            "menu_ids": [item["dish_id"] for item in items],
             # answerable=False 表示菜单里没有足够相关的菜品，模型应如实拒答而非硬推
-            "answerable": result.get("answerable"),
+            "answerable": answerable,
             "top_score": result.get("top_score"),
         }
     except Exception as e:
         logger.error(f"search_menu tool error: {e}")
         return {"success": False, "message": str(e)}
+
 
 @tool
 def check_delivery(address: str, travel_mode: str = "2") -> Dict[str, Any]:
@@ -55,19 +123,21 @@ def query_order(order_no: Optional[str] = None, user_id: Optional[int] = None) -
     查询订单状态和详情。
     参数 order_no 是可选的订单号。
     如果不提供订单号，工具会自动尝试查找该客官最近的一笔订单。
-    user_id 由系统自动提供，用于确保只能查到客官自己的订单。
+    user_id 由系统自动注入，是查询的必要条件：没有 user_id 时不会查询任何订单。
     """
     try:
+        if not user_id:
+            return "客官，查询订单需要先登录哦～登录后小二才能帮您查自己的订单。"
+
         target_order_no = order_no
-        
+
         with DataBaseConnection() as db:
             if not target_order_no:
                 logger.info(f"AI Tool Calling: query_order (no order_no, user_id={user_id})")
-                if user_id:
-                    db.cursor.execute("SELECT order_no FROM orders WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
-                else:
-                    db.cursor.execute("SELECT order_no FROM orders ORDER BY created_at DESC LIMIT 1")
-                
+                db.cursor.execute(
+                    "SELECT order_no FROM orders WHERE user_id = %s ORDER BY created_at DESC LIMIT 1",
+                    (user_id,),
+                )
                 row = db.cursor.fetchone()
                 if row:
                     target_order_no = row['order_no']
@@ -75,14 +145,11 @@ def query_order(order_no: Optional[str] = None, user_id: Optional[int] = None) -
                     return "客官，小店还没查到您的下单记录呢，要不您先点几个菜试试？"
 
             logger.info(f"AI Tool Calling: query_order for '{target_order_no}' (user_id={user_id})")
-            # 增加 user_id 校验，防止越权查询
-            if user_id:
-                query_sql = "SELECT * FROM orders WHERE order_no = %s AND user_id = %s"
-                db.cursor.execute(query_sql, (target_order_no, user_id))
-            else:
-                query_sql = "SELECT * FROM orders WHERE order_no = %s"
-                db.cursor.execute(query_sql, (target_order_no,))
-            
+            # user_id 必须参与过滤，防止越权查询他人订单
+            db.cursor.execute(
+                "SELECT * FROM orders WHERE order_no = %s AND user_id = %s",
+                (target_order_no, user_id),
+            )
             order = db.cursor.fetchone()
         
         if order:

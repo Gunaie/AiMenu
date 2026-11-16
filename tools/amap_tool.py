@@ -7,7 +7,6 @@
 中间件开发（技术路线）
 """
 import logging
-from http.client import responses
 from json import JSONDecodeError
 from typing import Dict, Any, Optional, Literal, Union
 from dataclasses import dataclass
@@ -138,7 +137,7 @@ def safe_request(base_url: str, params: dict) -> Optional[Dict]:
         
         response.raise_for_status()
         return data
-    except requests.exceptions.SSLError as e:
+    except requests.exceptions.SSLError:
         # 2.发送请求
         try:
             http_request_url = base_url.replace("https://", "http://")

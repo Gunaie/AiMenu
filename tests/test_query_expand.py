@@ -13,8 +13,10 @@ from tools.query_expand import (
     build_search_text,
     expand_query,
     extract_price,
+    parse_diet_constraints,
     parse_price_constraint,
     strip_fillers,
+    update_session_constraints,
 )
 
 
@@ -129,6 +131,96 @@ def test_hybrid_search_filters_by_price(vector_db):
     assert [item["content"] for item in results] == [
         "菜品ID:2|菜品名称:麻婆豆腐|价格:¥28.00"
     ]
+
+
+@pytest.mark.parametrize("query, expected", [
+    ("来点不辣的", {"max_spice": 0}),
+    ("微辣的就行", {"max_spice": 1}),
+    ("来点中辣的", {"max_spice": 2}),
+    ("来点辣的", {"max_spice": 3}),
+    ("想吃素菜", {"vegetarian": True}),
+    ("推荐点川菜", {}),
+])
+def test_parse_diet_constraints(query, expected):
+    assert parse_diet_constraints(query) == expected
+
+
+@pytest.mark.parametrize("query, previous, expected", [
+    ("来点不辣的", {}, {"max_spice": 0}),
+    ("预算50元以内", {}, {"max_price": 50.0}),
+    ("想吃素菜", {"max_spice": 1}, {"max_spice": 1, "vegetarian": True}),
+    ("来点辣的", {"max_spice": 0}, {}),
+    ("推荐个麻辣香锅", {"max_spice": 0}, {"max_spice": 0}),
+    ("预算不限", {"max_price": 50.0}, {}),
+    ("不用素了", {"vegetarian": True}, {}),
+])
+def test_update_session_constraints(query, previous, expected):
+    assert update_session_constraints(previous, query) == expected
+
+
+class _DietCollection:
+    """带结构化 metadata 的替身集合，用于验证硬过滤"""
+
+    def query(self, **kwargs):
+        return {
+            "ids": [["1", "2", "3"]],
+            "metadatas": [[
+                {
+                    "content": "菜品ID:1|菜品名称:麻婆豆腐|价格:¥28.00",
+                    "line_number": 1, "dish_id": "1", "dish_name": "麻婆豆腐",
+                    "spice_level": 2, "is_vegetarian": False,
+                },
+                {
+                    "content": "菜品ID:2|菜品名称:清炒时蔬|价格:¥18.00",
+                    "line_number": 2, "dish_id": "2", "dish_name": "清炒时蔬",
+                    "spice_level": 0, "is_vegetarian": False,
+                },
+                {
+                    "content": "菜品ID:3|菜品名称:白灼菜心|价格:¥22.00",
+                    "line_number": 3, "dish_id": "3", "dish_name": "白灼菜心",
+                    "spice_level": 0, "is_vegetarian": True,
+                },
+            ]],
+        }
+
+
+def _diet_db(monkeypatch):
+    db = ChromaVectorDB()
+    db.collection = _DietCollection()
+    db.bm25 = None
+    db.use_rerank = False
+    db.use_rewrite = True
+    monkeypatch.setattr(db, "_embedding_content", lambda query: [0.1, 0.2])
+    return db
+
+
+def test_hybrid_search_filters_by_spice_metadata(monkeypatch):
+    results = _diet_db(monkeypatch).hybrid_search("来点不辣的", top_k=5)
+
+    assert [item["dish_name"] for item in results] == ["清炒时蔬", "白灼菜心"]
+
+
+def test_hybrid_search_filters_vegetarian_metadata(monkeypatch):
+    results = _diet_db(monkeypatch).hybrid_search("想吃素菜", top_k=5)
+
+    assert [item["dish_name"] for item in results] == ["白灼菜心"]
+
+
+def test_hybrid_search_explicit_constraints_override_query(monkeypatch):
+    """会话槽位传入的约束优先于 query 文本解析"""
+    results = _diet_db(monkeypatch).hybrid_search(
+        "推荐川菜", top_k=5, diet_constraints={"max_spice": 0}
+    )
+
+    assert [item["dish_name"] for item in results] == ["清炒时蔬", "白灼菜心"]
+
+
+def test_hybrid_search_explicit_price_range(monkeypatch):
+    results = _diet_db(monkeypatch).hybrid_search(
+        "推荐川菜", top_k=5, price_range=(0.0, 20.0)
+    )
+
+    assert [item["dish_name"] for item in results] == ["清炒时蔬"]
 
 
 def test_judge_answerable_returns_none_without_rerank(monkeypatch):

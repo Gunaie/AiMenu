@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+.ruff_cache/
 .venv/
 venv/
 ENV/
@@ -31,9 +33,12 @@ logs/
 # Playwright
 ui/test-results/
 ui/playwright-report/
+
+# 文档默认不入库，仅保留可公开的评测与开发文档
 docs/*
-# 简历文案、面试问答与开发文档需要随仓库走（README/简历里的链接要能打开）
-!docs/resume_bullets.md
-!docs/interview_qa.md
+!docs/evaluation.md
 !docs/development_log.md
 !docs/implementation_guide.md
+# 简历文案与面试问答只保留在本地，不随仓库上传
+docs/resume_bullets.md
+docs/interview_qa.md

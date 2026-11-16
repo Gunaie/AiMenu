@@ -3,7 +3,6 @@
 覆盖：预热幂等（只加载一次）、加载失败不抛出、按 provider 决定是否预热。
 用例不加载真实权重，不访问网络。
 """
-import threading
 
 import pytest
 

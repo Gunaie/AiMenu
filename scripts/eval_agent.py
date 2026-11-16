@@ -6,6 +6,8 @@ MySQL/Redis 可用），用固定用例统计：
 
 - 工具选择准确率：实际调用的工具集合是否等于期望集合；
 - 可回答判定准确率：search_menu 返回的 answerable 是否符合预期；
+- 会话约束准确率：多轮辣度/预算/素食约束是否写入槽位，且检索结果确实按约束过滤；
+- 菜名有效性：检索结果是否全部来自菜单语料，防止推荐下架/幽灵菜；
 - 拒答命中率：域外问题是否给出「没有 / 无法」类回复。
 
 用法：
@@ -27,9 +29,12 @@ if PROJECT_ROOT not in sys.path:
 load_dotenv(override=True)
 
 CASES_PATH = os.path.join(PROJECT_ROOT, "data", "eval_agent_cases.json")
+MENU_DATA_PATH = os.path.join(PROJECT_ROOT, "data", "menu_items.json")
 REFUSAL_KEYWORDS = ("没有", "暂无", "无法", "抱歉", "不清楚", "不能", "办不到")
 # 记录 .env 里的默认模型：评审模型默认固定用它，保证 A/B 对比时代理模型变了、裁判模型不变
 BASE_MODEL = os.getenv("DASHSCOPE_MODEL_NAME", "qwen-plus")
+
+_MENU_NAME_CACHE = None
 
 
 def load_cases(path=CASES_PATH):
@@ -63,6 +68,50 @@ def _search_answerable(messages):
         if isinstance(payload, dict) and "answerable" in payload:
             flags.append(payload.get("answerable"))
     return flags
+
+
+def _search_items(messages):
+    """提取 search_menu 返回的结构化菜品条目（含辣度/价格/素食字段）"""
+    from langchain_core.messages import ToolMessage
+
+    items = []
+    for message in messages:
+        if not isinstance(message, ToolMessage) or message.name != "search_menu":
+            continue
+        try:
+            payload = json.loads(message.content)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(payload, dict):
+            items.extend(payload.get("items") or [])
+    return items
+
+
+def _menu_names():
+    """菜单语料里的全部菜名，用于校验 Agent 是否推荐了菜单之外的幽灵菜"""
+    global _MENU_NAME_CACHE
+    if _MENU_NAME_CACHE is None:
+        with open(MENU_DATA_PATH, "r", encoding="utf-8") as fp:
+            _MENU_NAME_CACHE = {item["dish_name"] for item in json.load(fp)}
+    return _MENU_NAME_CACHE
+
+
+def _matches_constraint_rules(items, rules):
+    """校验检索结果本身满足约束，而不只是槽位写入成功"""
+    if not items:
+        return False
+    for item in items:
+        if "max_spice" in rules:
+            level = item.get("spice_level")
+            if level is not None and int(level) > int(rules["max_spice"]):
+                return False
+        if "max_price" in rules:
+            price = item.get("price")
+            if price is None or float(price) > float(rules["max_price"]):
+                return False
+        if rules.get("vegetarian") is True and item.get("is_vegetarian") is False:
+            return False
+    return True
 
 
 def _final_answer(messages):
@@ -170,7 +219,11 @@ async def _judge_answer(llm, query, answer, rubric):
 
 async def evaluate(cases, user_id, judge=True, judge_model=None, agent_model=None):
     from langchain_core.messages import HumanMessage
-    from agent.langgraph_agent import SmartRestaurantGraph, restaurant_agent
+    from agent.langgraph_agent import (
+        DIET_CONSTRAINTS_SLOT,
+        SmartRestaurantGraph,
+        restaurant_agent,
+    )
 
     # 指定模型时另建实例：各工具模块导入时会 load_dotenv(override=True)，
     # 单改环境变量会被 .env 覆盖回去，导致 A/B 实际仍在跑默认模型。
@@ -184,19 +237,38 @@ async def evaluate(cases, user_id, judge=True, judge_model=None, agent_model=Non
         turns = case.get("turns") or [case["query"]]
         # 每次评测使用独立 thread，避免上一轮的历史被 Redis 记忆带进来
         thread_id = f"eval-{case['id']}-{run_id}"
-        messages = []
-        # 多轮用例在同一 thread 内依次对话，工具集合按整通对话统计
+        conversation = []
+        turn_records = []
+        # 多轮用例把历史消息一并传入（与 run/astream_run 的真实链路一致），
+        # 辣度/预算/素食约束则依赖 Redis 会话槽位跨轮传递。
         for turn in turns:
+            previous_count = len(conversation)
             state = await agent.app.ainvoke(
                 {
-                    "messages": [HumanMessage(content=turn)],
+                    "messages": conversation + [HumanMessage(content=turn)],
                     "user_info": {"id": user_id, "username": "eval", "nickname": "评测"},
                 },
                 # LangGraph 的工具节点需要继承 config，缺失时会报 required config key
                 config={"configurable": {"thread_id": thread_id}},
             )
-            messages = state.get("messages", [])
+            conversation = state.get("messages", []) or conversation
+            turn_messages = conversation[previous_count:]
+            turn_records.append({
+                "turn": turn,
+                "tools": _tool_names(turn_messages),
+                # 只保留校验需要的结构化字段，避免评测 JSON 被正文撑大
+                "items": [
+                    {
+                        "dish_name": item.get("dish_name"),
+                        "price": item.get("price"),
+                        "spice_level": item.get("spice_level"),
+                        "is_vegetarian": item.get("is_vegetarian"),
+                    }
+                    for item in _search_items(turn_messages)
+                ],
+            })
 
+        messages = conversation
         actual_tools = _tool_names(messages)
         expected_tools = sorted(case.get("expected_tools", []))
         answer = _final_answer(messages)
@@ -208,6 +280,33 @@ async def evaluate(cases, user_id, judge=True, judge_model=None, agent_model=Non
         definite_flags = [flag for flag in answerable_flags if flag is not None]
         if expected_answerable is not None and definite_flags:
             answerable_ok = definite_flags[-1] == expected_answerable
+
+        # 会话约束：既校验 Redis 槽位，也校验指定轮次检索结果是否真的按约束过滤
+        expected_constraint = case.get("expected_constraint")
+        constraint_ok = None
+        constraint_effect_ok = None
+        constraint_slot = None
+        if expected_constraint is not None:
+            constraint_slot = agent.memory_store.get_slot(
+                thread_id, DIET_CONSTRAINTS_SLOT, user_id=user_id
+            ) or {}
+            constraint_ok = constraint_slot == expected_constraint
+            turn_no = case.get("constraint_turn") or len(turns)
+            turn_items = (
+                turn_records[turn_no - 1]["items"]
+                if 0 < turn_no <= len(turn_records) else []
+            )
+            effect_rules = {k: v for k, v in expected_constraint.items() if v is not None}
+            # 撤销类用例（expected_constraint 为空）只需槽位为空，没有可校验的过滤效果
+            constraint_effect_ok = (
+                _matches_constraint_rules(turn_items, effect_rules) if effect_rules else True
+            )
+
+        # 菜名存在性：所有检索结果都必须在菜单语料里，防止推荐下架/幽灵菜
+        items = _search_items(messages)
+        dish_names = {item.get("dish_name") for item in items if item.get("dish_name")}
+        ghost_dishes = sorted(dish_names - _menu_names()) if dish_names else []
+        dish_validity_ok = (not ghost_dishes) if dish_names else None
 
         refusal_ok = None
         judge_ok = None
@@ -233,6 +332,13 @@ async def evaluate(cases, user_id, judge=True, judge_model=None, agent_model=Non
             "expected_answerable": expected_answerable,
             "answerable_flags": answerable_flags,
             "answerable_ok": answerable_ok,
+            "expected_constraint": expected_constraint,
+            "constraint_slot": constraint_slot,
+            "constraint_ok": constraint_ok,
+            "constraint_effect_ok": constraint_effect_ok,
+            "dish_validity_ok": dish_validity_ok,
+            "ghost_dishes": ghost_dishes,
+            "turn_records": turn_records,
             "refusal_ok": refusal_ok,
             "refusal_judge": judge_ok,
             "refusal_judge_reason": judge_reason,
@@ -255,6 +361,13 @@ async def evaluate(cases, user_id, judge=True, judge_model=None, agent_model=Non
     answer_items = [item for item in details if item["answer_ok"] is not None]
     answer_pass = sum(item["answer_ok"] for item in answer_items)
 
+    constraint_items = [item for item in details if item["constraint_ok"] is not None]
+    constraint_pass = sum(item["constraint_ok"] for item in constraint_items)
+    effect_items = [item for item in details if item["constraint_effect_ok"] is not None]
+    effect_pass = sum(item["constraint_effect_ok"] for item in effect_items)
+    dish_items = [item for item in details if item["dish_validity_ok"] is not None]
+    dish_pass = sum(item["dish_validity_ok"] for item in dish_items)
+
     latencies = [item["latency_ms"] for item in details]
     tokens = [item["tokens"] for item in details]
     token_calls = [item for item in tokens if item["total_tokens"]]
@@ -268,6 +381,15 @@ async def evaluate(cases, user_id, judge=True, judge_model=None, agent_model=Non
         ),
         "answer_accuracy": (
             round(answer_pass / len(answer_items), 4) if answer_items else None
+        ),
+        "constraint_accuracy": (
+            round(constraint_pass / len(constraint_items), 4) if constraint_items else None
+        ),
+        "constraint_effect_accuracy": (
+            round(effect_pass / len(effect_items), 4) if effect_items else None
+        ),
+        "dish_validity_accuracy": (
+            round(dish_pass / len(dish_items), 4) if dish_items else None
         ),
         "refusal_accuracy": (
             round(refusal_pass / len(refusal_items), 4) if refusal_items else None
@@ -352,6 +474,12 @@ def main():
         flags.append("工具✓" if item["tool_match"] else f"工具✗({item['actual_tools']})")
         if item["answerable_ok"] is not None:
             flags.append("拒答✓" if item["answerable_ok"] else "拒答✗")
+        if item["constraint_ok"] is not None:
+            flags.append("约束✓" if item["constraint_ok"] else "约束✗")
+        if item["constraint_effect_ok"] is not None:
+            flags.append("效果✓" if item["constraint_effect_ok"] else "效果✗")
+        if item["dish_validity_ok"] is not None:
+            flags.append("菜名✓" if item["dish_validity_ok"] else f"菜名✗({item['ghost_dishes']})")
         if item["refusal_ok"] is not None:
             flags.append("话术✓" if item["refusal_ok"] else "话术✗")
         if item["refusal_judge"] is not None:
@@ -362,6 +490,9 @@ def main():
         f"用例 {summary['case_count']} | 工具准确率 {summary['tool_accuracy']:.4f} | "
         f"答复正确率 {summary['answer_accuracy']} | "
         f"可回答判定 {summary['answerable_accuracy']} | "
+        f"会话约束 {summary['constraint_accuracy']} | "
+        f"约束效果 {summary['constraint_effect_accuracy']} | "
+        f"菜名有效 {summary['dish_validity_accuracy']} | "
         f"拒答话术(关键词) {summary['refusal_accuracy']} | "
         f"拒答话术(LLM 评审) {summary['refusal_judge_accuracy']}"
     )

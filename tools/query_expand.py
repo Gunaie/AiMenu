@@ -62,12 +62,26 @@ _PRICE_MAX_PATTERNS = (
     _NUM + r"\s*(?:块钱|块|元|rmb)?\s*(?:钱)?\s*(?:以内|以下|之内|封顶)",
     r"不超过\s*" + _NUM + r"\s*(?:块钱|块|元)?",
     _NUM + r"\s*(?:块钱|块|元)\s*内",
+    r"预算\s*" + _NUM + r"\s*(?:块钱|块|元)?",
 )
 _PRICE_MIN_PATTERNS = (
     _NUM + r"\s*(?:块钱|块|元)?\s*(?:以上|往上|起步)",
     r"至少\s*" + _NUM + r"\s*(?:块钱|块|元)?",
 )
 _DISH_PRICE_PATTERN = re.compile(r"价格[:：]\s*[¥￥]?\s*(\d+(?:\.\d+)?)")
+
+_SPICE_ZERO_PATTERNS = (r"不辣", r"不要辣", r"不吃辣", r"清淡", r"口味轻")
+_SPICE_ONE_PATTERNS = (r"微辣", r"一点点辣", r"稍微辣")
+_SPICE_TWO_PATTERNS = (r"中辣",)
+_SPICE_THREE_PATTERNS = (r"重辣", r"特辣", r"爆辣", r"变态辣", r"很辣", r"最辣")
+# 未指明程度但明确要辣（「来点辣的」）：3 表示不限制辣度
+# 只匹配表达诉求的说法，避免把「麻辣香锅」这类菜名误判成放宽辣度约束
+_SPICE_ANY_PATTERN = re.compile(r"辣的|辣一点|辣一些|吃辣|要辣|重口|够味")
+# 显式撤销已有约束，避免上一轮「不辣」被永久沿用
+_SPICE_CLEAR_PATTERNS = (r"不挑辣度", r"辣度随意", r"辣度都可以", r"不用管辣", r"随便辣")
+_VEGETARIAN_PATTERN = re.compile(r"素食|吃素|素的|全素|素菜|斋菜|斋饭")
+_VEGETARIAN_CLEAR_PATTERN = re.compile(r"不用素|可以吃肉|吃点肉|荤素都行|不忌口")
+_BUDGET_CLEAR_PATTERN = re.compile(r"预算不限|不限预算|价格随意|多少钱都行|不差钱")
 
 
 def _cn_to_number(text: str) -> Optional[float]:
@@ -124,6 +138,73 @@ def extract_price(content: str) -> Optional[float]:
     """从菜品文本（菜品ID:1|菜品名称:x|价格:¥45.00）中提取价格"""
     match = _DISH_PRICE_PATTERN.search(content or "")
     return float(match.group(1)) if match else None
+
+
+def parse_diet_constraints(query: str) -> Dict[str, object]:
+    """解析 query 中的辣度与素食约束，供检索阶段做硬过滤
+
+    返回示例：{"max_spice": 0} / {"vegetarian": True} / 两者都有。
+    max_spice=3 表示只要求「辣」但不限程度，等价于不过滤辣度。
+    未提及相关约束时返回空字典（表示不过滤）。
+    """
+    text = strip_fillers(query)
+    if not text:
+        return {}
+
+    constraints: Dict[str, object] = {}
+    if any(re.search(pattern, text) for pattern in _SPICE_ZERO_PATTERNS):
+        constraints["max_spice"] = 0
+    elif any(re.search(pattern, text) for pattern in _SPICE_ONE_PATTERNS):
+        constraints["max_spice"] = 1
+    elif any(re.search(pattern, text) for pattern in _SPICE_TWO_PATTERNS):
+        constraints["max_spice"] = 2
+    elif any(re.search(pattern, text) for pattern in _SPICE_THREE_PATTERNS):
+        constraints["max_spice"] = 3
+    elif _SPICE_ANY_PATTERN.search(text):
+        constraints["max_spice"] = 3
+    if _VEGETARIAN_PATTERN.search(text):
+        constraints["vegetarian"] = True
+    return constraints
+
+
+def parse_constraint_updates(query: str) -> Dict[str, object]:
+    """解析本轮对会话约束的显式修改；值为 None 表示清除该约束"""
+    text = strip_fillers(query)
+    if not text:
+        return {}
+
+    updates: Dict[str, object] = {}
+    diet = parse_diet_constraints(text)
+    if "max_spice" in diet:
+        # 3 表示「要辣但不限程度」，对会话而言等于解除上一轮的辣度限制
+        max_spice = int(diet["max_spice"])
+        updates["max_spice"] = None if max_spice >= 3 else max_spice
+    if diet.get("vegetarian"):
+        updates["vegetarian"] = True
+
+    if any(re.search(pattern, text) for pattern in _SPICE_CLEAR_PATTERNS):
+        updates["max_spice"] = None
+    if _VEGETARIAN_CLEAR_PATTERN.search(text):
+        updates["vegetarian"] = None
+    if _BUDGET_CLEAR_PATTERN.search(text):
+        updates["max_price"] = None
+
+    price_range = parse_price_constraint(text)
+    if price_range:
+        upper = price_range[1]
+        updates["max_price"] = None if upper == float("inf") else upper
+    return updates
+
+
+def update_session_constraints(previous: Optional[Dict[str, object]], query: str) -> Dict[str, object]:
+    """把本轮约束合并进会话槽位：本轮显式值覆盖旧值，None 表示撤销"""
+    merged = dict(previous or {})
+    for key, value in parse_constraint_updates(query).items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
+    return merged
 
 
 def strip_fillers(query: str) -> str:

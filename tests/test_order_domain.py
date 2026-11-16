@@ -67,6 +67,14 @@ def test_unknown_status_is_rejected():
     assert not can_transition_order_status("pending", "shipped")
 
 
+def test_get_all_orders_requires_user_id():
+    """缺少 user_id 时必须报错，禁止无过滤查询全表"""
+    from tools.db_tool import get_all_orders
+
+    with pytest.raises(ValueError):
+        get_all_orders(user_id=None)
+
+
 # ---------------- 下单业务异常 ----------------
 
 def test_submit_order_returns_business_error_when_stock_short(monkeypatch):
@@ -97,7 +105,7 @@ def test_submit_order_passes_idempotency_key(authed_user, monkeypatch):
         "tools.db_tool.create_order",
         lambda order_data: captured.update(order_data) or "ORD-IDEM",
     )
-    monkeypatch.setattr("api.main.send_notification", lambda order_no: None)
+    monkeypatch.setattr("api.deps.send_notification", lambda order_no: None)
 
     response = client.post(
         "/order/submit",

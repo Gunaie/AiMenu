@@ -40,8 +40,8 @@ def test_oversized_body_rejected():
 
 
 def test_login_rate_limited(monkeypatch):
-    monkeypatch.setattr("api.main.LOGIN_RATE_LIMIT_PER_MINUTE", 10)
-    monkeypatch.setattr("api.main.cache.incr_with_ttl", lambda key, expire=60: 11)
+    monkeypatch.setattr("api.deps.LOGIN_RATE_LIMIT_PER_MINUTE", 10)
+    monkeypatch.setattr("api.deps.cache.incr_with_ttl", lambda key, expire=60: 11)
 
     response = client.post("/auth/login", data={"username": "admin", "password": "wrong"})
 
@@ -51,8 +51,8 @@ def test_login_rate_limited(monkeypatch):
 
 def test_login_failure_message_does_not_leak_account(monkeypatch):
     """用户不存在与密码错误返回同一句话，避免用户名枚举"""
-    monkeypatch.setattr("api.main.LOGIN_RATE_LIMIT_PER_MINUTE", 0)
-    monkeypatch.setattr("api.main.get_user_by_username", lambda username: None)
+    monkeypatch.setattr("api.deps.LOGIN_RATE_LIMIT_PER_MINUTE", 0)
+    monkeypatch.setattr("api.deps.get_user_by_username", lambda username: None)
 
     response = client.post("/auth/login", data={"username": "nobody", "password": "whatever"})
 
