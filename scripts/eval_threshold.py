@@ -10,8 +10,11 @@
 
 用法：
     python scripts/eval_threshold.py --json data/eval_threshold.json
+    python scripts/eval_threshold.py --from-eval data/eval_rag_local.json   # 复用已有评测分数
 
 需要 DashScope Embedding + Rerank 可用，且本地 chroma_db 已完成初始化。
+
+提醒：搜索阈值时只使用 dev 切分，test 仅用于报告，避免在测试集上调参。
 """
 import argparse
 import json
@@ -22,6 +25,10 @@ import sys
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv(override=True)
 
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 LABELS_PATH = os.path.join(DATA_DIR, "eval_labels.json")
@@ -107,16 +114,29 @@ def main():
     parser.add_argument("--max-score", type=float, default=0.90, help="网格上界")
     parser.add_argument("--step", type=float, default=0.005, help="网格步长")
     parser.add_argument("--json", dest="json_path", help="将结果写入 JSON")
+    parser.add_argument("--from-eval", dest="from_eval",
+                        help="复用 eval_rag.py 输出 JSON 中的 Rerank 最高分，跳过重新检索")
     args = parser.parse_args()
 
-    labels = _load_json(args.labels, "评测标注")
-    negatives = _load_json(args.negatives, "域外问题集")
-
-    try:
-        pos, neg = _collect_scores(labels, negatives, args.top_k)
-    except (RuntimeError, FileNotFoundError, ValueError) as exc:
-        print(f"\n[标定中止] {exc}")
-        raise SystemExit(2)
+    if args.from_eval:
+        data = _load_json(args.from_eval, "评测结果")
+        pos = [(item["query"], float(item["hybrid_score"]))
+               for item in data.get("details", []) if item.get("hybrid_score") is not None]
+        neg = [(query, float(score))
+               for query, score in (data.get("refusal", {}).get("negative_scores") or {}).items()
+               if score is not None]
+        if not pos or not neg:
+            print("\n[标定中止] 评测结果缺少 hybrid_score 或 negative_scores")
+            raise SystemExit(2)
+        print(f"复用 {args.from_eval} 的分数：正例 {len(pos)} 条，域外 {len(neg)} 条")
+    else:
+        labels = _load_json(args.labels, "评测标注")
+        negatives = _load_json(args.negatives, "域外问题集")
+        try:
+            pos, neg = _collect_scores(labels, negatives, args.top_k)
+        except (RuntimeError, FileNotFoundError, ValueError) as exc:
+            print(f"\n[标定中止] {exc}")
+            raise SystemExit(2)
 
     dev_pos, test_pos = _split([score for _, score in pos], args.dev_ratio, args.seed)
     dev_neg, test_neg = _split([score for _, score in neg], args.dev_ratio, args.seed)
