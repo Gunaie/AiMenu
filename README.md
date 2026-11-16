@@ -164,6 +164,13 @@ python scripts/eval_threshold.py --json data/eval_threshold_v3.json
 # Agent 端到端评测：工具选择、answerable 判定与拒答话术
 python scripts/eval_agent.py --no-judge --model qwen3.5-plus-2026-02-15 --json data/eval_agent_full_qwen35.json
 
+# 导出失败案例集（检索未命中 / 误拒 / 误收 / Agent 失败）
+python scripts/export_failure_cases.py --out data/eval_failure_cases.json
+
+# 对比基线与本次结果，指标跌幅超过阈值时以非零码退出（CI 门禁用）
+python scripts/check_eval_regression.py --result data/eval_rag_v3.json \
+    --baseline data/eval_baseline.json
+
 # 接口压测（需后端已启动）
 python scripts/loadtest.py --concurrency 20 --duration 10 --paths /healthy,/menu/list \
     --json data/loadtest_rest.json
@@ -182,7 +189,9 @@ python scripts/loadtest.py --stream --sweep 5,10,20 --requests-per-worker 1 \
 | 向量 + BM25 + Rerank | **0.8120** | **0.9043** | **0.8524** |
 
 > 完整的分类型指标、拒答阈值标定、Agent 端到端评测、模型 A/B、流式压测与冷启动数据见
-> [docs/evaluation.md](./docs/evaluation.md)。所有指标均基于本地模拟语料，不代表线上规模。
+> [docs/evaluation.md](./docs/evaluation.md)；可复现评测报告（数据集、基线对比、失败案例集与
+> CI 回退门禁）见 [docs/eval_report.md](./docs/eval_report.md)。所有指标均基于本地模拟语料，
+> 不代表线上规模。
 
 前端 e2e（Playwright，需后端已在 8001 启动）：
 

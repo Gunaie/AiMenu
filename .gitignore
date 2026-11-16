@@ -39,6 +39,8 @@ docs/*
 !docs/evaluation.md
 !docs/development_log.md
 !docs/implementation_guide.md
+!docs/eval_report.md
+!docs/blog_eval_pipeline.md
 # 简历文案与面试问答只保留在本地，不随仓库上传
 docs/resume_bullets.md
 docs/interview_qa.md
