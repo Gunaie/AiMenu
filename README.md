@@ -39,7 +39,7 @@ flowchart LR
     S --> DB[(MySQL 8<br/>菜品 / 订单 / 用户)]
     S --> R[(Redis 7<br/>缓存 / 会话记忆)]
 
-    API -->|/chat 流式| A[LangGraph Agent<br/>Qwen-Plus]
+    API -->|/chat 流式| A[LangGraph Agent<br/>Qwen（DashScope）]
     A --> T1[search_menu]
     A --> T2[check_delivery]
     A --> T3[query_order]
@@ -63,7 +63,7 @@ flowchart LR
 | 层次 | 技术 |
 | --- | --- |
 | 后端 | FastAPI、Uvicorn、Pydantic |
-| AI | LangGraph、LangChain、Qwen-Plus（DashScope）、text-embedding-v4、qwen3-vl-rerank / bge-reranker-v2-m3（本地可选） |
+| AI | LangGraph、LangChain、Qwen（DashScope，代码默认 `qwen-plus`，本项目实测用快照 `qwen3.7-plus-2026-05-26`）、text-embedding-v4、qwen3-vl-rerank / bge-reranker-v2-m3（本地可选） |
 | 检索 | ChromaDB、rank_bm25、jieba |
 | 存储 | MySQL 8、Redis 7 |
 | 前端 | Vue 3、Element Plus、Pinia、Vite |
@@ -188,12 +188,12 @@ python scripts/loadtest.py --stream --sweep 5,10,20 --requests-per-worker 1 \
     --cooldown 65 --json data/loadtest_stream.json
 
 # 拒答阈值 held-out 标定：只在 dev 上选阈值，再到 test 上报误拒率
-python scripts/eval_threshold.py --json data/eval_threshold.json
+python scripts/eval_threshold.py --json data/eval_threshold_local.json
 
 # Agent 端到端评测：工具选择、answerable 判定与拒答话术
 python scripts/eval_agent.py --json data/eval_agent.json
 
-# 模型 A/B：指定代理模型，评审模型建议固定（这里两组都用自己的模型，评审指标只作参考）
+# 模型 A/B：指定代理模型；两轮统一用 qwen-plus 做评审，评审类指标才可横向比较
 python scripts/eval_agent.py --model qwen-plus --judge-model qwen-plus --json data/eval_agent_model_b.json
 
 # 与基线对比：任一核心指标低于基线超过 0.02 时以退出码 3 失败
@@ -240,8 +240,9 @@ npx playwright test                  # 需后端已在 8001 启动
 | 流式对话 | 发一条会触发推荐的 query，断言回复长度多次增长（边收边渲染）、推荐卡片出现、点「+ 加入」后购物车角标变化 |
 | 下单幂等 | 真实高德配送校验 → 加购 → 同帧连点两次「提交订单」：只发出 1 次 `POST /order/submit`、请求头带 `Idempotency-Key`、订单数 +1 |
 
-本机（Windows + 系统 Edge、后端单 worker）整套 3 条用例实测 3 passed / 46.1s；首次跑到流式用例时
-本地 Rerank 模型需要加载，单条会到 2.6 分钟。配送地址用餐厅附近的「武汉市洪山区光谷步行街」
+本机（Windows + 系统 Edge、后端单 worker、后端启动后已完成后台预热）整套 3 条用例实测 3 passed / 46.1s；
+若在预热完成前就跑流式用例，首个请求要等本地 Rerank 权重加载（见「冷启动与预热」），单条会显著变慢。
+配送地址用餐厅附近的「武汉市洪山区光谷步行街」
 （6.33km、配送费 9.7 元）；填其他城市会因超出 10km 配送范围被服务端拒绝。
 `ui/test-results/`、`ui/playwright-report/` 是失败时的截图与 trace，已在 `.gitignore` 中忽略。
 
@@ -318,8 +319,8 @@ LOCAL_RERANK_DEVICE=auto
 | 属性约束 `attribute` | 95 | 0.4947 | 0.6737 | 0.5684 |
 
 数据来源：`data/menu_items.json`（1060 道菜品）、`data/eval_labels.json`（585 条标注）、
-`data/eval_rag_local.json`（逐条明细）。Embedding 接口存在少量随机性，重跑指标会有 ±0.01 波动；
-当前 Top-3 命中 530/585，未命中 55 条。
+`data/eval_rag_local.json`（逐条明细）。默认命中 Embedding 缓存时指标完全可复现；重建缓存或走真实接口时
+会有 ±0.01 波动。当前 Top-3 命中 530/585，未命中 55 条。
 
 三点结论：
 
@@ -374,11 +375,11 @@ LOCAL_RERANK_DEVICE=auto
 | 指标 | 结果 | 说明 |
 | --- | --- | --- |
 | 工具选择准确率 | 0.9672（59/61） | 2 条未调工具：`search-spicy-level`（只反问没检索）、`delivery-time`（先反问地址）；越权用例已不再误调 `query_order` |
-| 最终答复正确率（LLM 评审） | 0.8689（53/61） | 失分集中在多轮细化（川菜→不辣、再便宜一点）与超范围配送（反问地址而非直接说明不能送） |
-| answerable 判定 | 0.9474（36/38） | 两条多轮预算追问判成不可回答（误拒）；`refuse-missing-crab` 判成可回答（误收） |
+| 最终答复正确率（LLM 评审） | 0.8689（53/61） | 8 条失分：4 条多轮（川菜→不辣/预算、汤→不辣、再便宜一点均出现属性漂移）、`delivery-far` 反问地址而没有直接说明不能送、3 条单轮（`search-cantonese` 把客家/潮汕菜当粤菜、`search-combo` 荤素搭配没给素菜、`search-spicy-level` 只反问不推荐） |
+| answerable 判定 | 0.9474（36/38） | 1 条误拒（`multi-turn-budget` 的「三十块以内的川菜」判成不可回答）；1 条误收（`refuse-missing-crab` 判成可回答）；`search-spicy-level` 未调检索、无判定 |
 | 如实拒答率（关键词 / LLM 评审） | 0.6923 / 0.6923（各 9/13） | 两个口径互补：关键词漏判婉拒措辞（天气、角色扮演、医疗、行程 4 条），评审漏判「菜单里没有」与护栏话术（4 条）；无一条两个口径同时判失败，人工核对 13 条均明确拒答 |
 | 延迟 | P50 9.96s / P95 25.09s / 均值 11.32s | 本地 CPU 重排 + 真实 LLM，非线上水平；P95 由多轮用例拉高 |
-| token 成本 | 均值 2424 输入 + 235 输出 = 2659/条，58 条有 usage 合计 154244 | 含工具调用那一轮；按模型单价折算即可得单次成本 |
+| token 成本 | 均值 2424 输入 + 235 输出 = 2659/条（58 条进入模型） | 另 3 条被图入口护栏直接拒答，0 token 不进模型；61 条合计 154244 |
 
 明细见 `data/eval_agent_snapshot.json`（代理模型 `qwen3.7-plus-2026-05-26`、评审模型 `qwen-plus`，
 与 `.env` 配置一致）；早期别名 `qwen3.7-plus` 的自评明细见 `data/eval_agent_model_a.json`。三类指标分别对应
@@ -430,20 +431,20 @@ TTL 与历史一致），下一轮追问时地址既会写进系统提示，也�
 | 指标 | A: `qwen3.7-plus-2026-05-26` | B: `qwen-plus` | 差异 |
 | --- | --- | --- | --- |
 | 工具选择准确率 | 0.9672（59/61） | 0.8689（53/61） | **+9.8pt** |
-| answerable 判定 | 0.9474（36/38） | 0.9375（36/38） | +1.0pt |
+| answerable 判定 | 0.9474（36/38） | 0.9375（30/32） | +1.0pt（B 组 6 条漏调检索的用例没有判定） |
 | 答复正确率（LLM 评审） | 0.8689（53/61） | 0.8361（51/61） | +3.3pt |
 | 如实拒答率（关键词 / 评审） | 0.6923 / 0.6923 | 0.6154 / 0.6923 | 关键词 +7.7pt，评审持平 |
-| 延迟 P50 / P95 / 均值 | 9.96s / 25.09s / 11.32s | 9.67s / 26.58s / 11.74s | 基本持平（±3%） |
-| token 均值（输入 + 输出） | 2424 + 235 = 2659 | 2134 + 235 = 2369 | +12% |
+| 延迟 P50 / P95 / 均值 | 9.96s / 25.09s / 11.32s | 9.67s / 26.58s / 11.74s | 均值差 3.7%、P95 差 5.9%，基本持平 |
+| token 均值（输入 + 输出） | 2424 + 235 = 2659 | 2134 + 235 = 2369 | qwen-plus 少 11% |
 
 结论与限制：
 
-- **差距集中在「该不该调工具」**：`qwen-plus` 有 6 条推荐类问题（`search-flavor` / `search-spicy` /
-  `search-sichuan-mild` / `search-budget-cheap` / `search-beef` / `search-grill`）完全不调 `search_menu`，
-  直接凭上下文报菜名，存在编造风险；`multi-turn-three` 还在「推荐几个菜」时误调 `query_order`。
-  这种退化在人工抽检和只看检索指标时都容易漏掉。
+- **差距集中在「该不该调工具」**：`qwen-plus` 工具选择失败共 8 条，其中 6 条推荐类问题（`search-flavor` /
+  `search-spicy` / `search-sichuan-mild` / `search-budget-cheap` / `search-beef` / `search-grill`）
+  完全不调 `search_menu`，直接凭上下文报菜名，存在编造风险；`multi-turn-three` 在「推荐几个菜」时误调
+  `query_order`；`delivery-time` 先反问地址、没有调 `check_delivery`。这种退化在人工抽检和只看检索指标时都容易漏掉。
 - **延迟差异是被环境噪声放大的**：早先一轮别名 `qwen3.7-plus` 的评测均值 19.24s、据此得出「qwen-plus 快 39%」，
-  同机重跑后两模型均值 11.32s / 11.74s，差异不足 4%，不能再宣称「快 39%」。token 上 `qwen-plus` 反而少 12%。
+  同机重跑后两模型均值 11.32s / 11.74s，差异不足 4%，不能再宣称「快 39%」。token 上 `qwen-plus` 反而少 11%。
 - 早先一轮 A 组用别名 `qwen3.7-plus` 且自评，拒答评审给了 13/13；固定裁判后只有 9/13，说明自评偏宽松，
   以本轮同裁判结果为准。
 - 拒答的两个口径各有 4 条漏判且不重叠（关键词漏婉拒措辞、评审漏「菜单无此菜」与护栏话术），
@@ -465,7 +466,7 @@ TTL 与历史一致），下一轮追问时地址既会写进系统提示，也�
 | 分布 | 标注问题 top1 分数 | 域外问题 top1 分数 |
 | --- | --- | --- |
 | 最低 | 0.0058 | 0.0000 |
-| 中位数 | 0.9890 | 0.0006 |
+| 中位数 | 0.9890 | 0.00065 |
 | 最高 | 0.9996 | 0.9771 |
 
 按固定种子切分 dev / test（`scripts/eval_threshold.py`，网格 0~0.90、步长 0.005；dev 选阈值、test 只报告）：
@@ -495,8 +496,9 @@ TTL 与历史一致），下一轮追问时地址既会写进系统提示，也�
 - **误收 4 条**：「红烧熊掌」0.6931、「杨枝甘露蛋糕」0.9771 都是拼词型负例（菜单里有「熊掌豆腐」「杨枝甘露」），
   Rerank 把整串词都匹配上了；「123」0.13、「？？？」0.21 两个无意义输入刚好越过阈值。
   单看 top1 分数区分不了拼词负例，需要在 Agent 层补一道「菜名是否真实存在于菜单」的校验。
-- **误拒 14 条**：几乎全是「预算 + 属性」型 query，例如「十五块以内的甜汤糖水」0.0058、
-  「四十块以内、卤出来的」0.0306、「三十块以内、有鸡蛋的」0.0473。价格过滤把候选压得很窄，
+- **误拒 14 条**：10 条是「预算 + 属性」型 query，例如「十五块以内的甜汤糖水」0.0058、
+  「四十块以内、卤出来的」0.0306、「三十块以内、有鸡蛋的」0.0473；另有 1 条组合约束
+  （「只有青椒塞肉这一种」）和 3 条口语化 query（近义菜把分数拉低）。价格过滤把候选压得很窄，
   Rerank 分数整体偏低就被判成不可回答。方向是让阈值随「是否命中价格/做法等强约束」动态放宽，
   而不是全局一个 0.115。
 
@@ -554,6 +556,8 @@ TTL 与历史一致），下一轮追问时地址既会写进系统提示，也�
 
 「改造前 57.8」仍是当时的记录值，复现它需要回滚连接池与线程池改造，本轮没有重跑那一侧，
 因此上表的对比只用于说明优化方向，横向对比请以同一台机器上的「改造后」两次结果为准。
+说明：`scripts/loadtest.py` 的 `--json` 只用于 `--stream` 分支，上面这几组 REST 压测数值是终端输出记录，
+仓库里没有对应的结果文件；流式压测的三档结果则完整保存在 `data/loadtest_stream.json`。
 
 ```bash
 # 复现（需后端已启动在 8001）
@@ -566,11 +570,11 @@ python scripts/loadtest.py --concurrency 20 --duration 10 --paths /healthy,/menu
 记录**首字延迟（TTFT）**、总耗时、输出 token 与 tokens/s；每档请求数用
 `--requests-per-worker` 限制，避免压测把 LLM 额度打光。
 
-同一台机器、本地 CPU 重排 + `qwen3.7-plus`，每档 1 请求/客户端、档位间冷却 65 秒避开限流窗口：
+同一台机器、本地 CPU 重排 + `qwen3.7-plus`（当时 .env 用的别名，现为快照 `qwen3.7-plus-2026-05-26`），
+每档 1 请求/客户端、档位间冷却 65 秒避开限流窗口（下表即 `data/loadtest_stream.json` 的 5/10/20 三档）：
 
 | 并发 | 请求 | 错误 | 429 | TTFT P50 | TTFT P95 | 总耗时 P50 | 总耗时 P95 | tokens/s |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1（预热） | 1 | 0 | 0 | 1411 ms | 1411 ms | 12.8 s | 12.8 s | 27.3 |
 | 5 | 5 | 0 | 0 | 1252 ms | 1378 ms | 15.5 s | 27.9 s | 30.0 |
 | 10 | 10 | 0 | 0 | 2371 ms | 5114 ms | 20.8 s | 42.2 s | 18.8 |
 | 20 | 20 | 0 | 0 | 3130 ms | 17805 ms | 38.9 s | 56.0 s | 18.8 |
