@@ -4,7 +4,7 @@
   "query_count": 585,
   "corpus_size": 1060,
   "rerank_enabled": true,
-  "rerank_model": "C:/Users/gunaie/.cache/modelscope/bge-reranker-v2-m3",
+  "rerank_model": "BAAI/bge-reranker-v2-m3",
   "rerank_provider": "local",
   "random_baseline": {
     "corpus_size": 1060,

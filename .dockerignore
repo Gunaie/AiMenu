@@ -22,6 +22,12 @@ chroma_db/
 mysql_data/
 redis_data/
 
+# 本地模型权重与运行产物（体积大，镜像内不使用）
+models/
+logs/
+screenshots/
+.github/
+
 # Environment
 .env
 

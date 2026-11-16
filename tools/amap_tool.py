@@ -57,7 +57,7 @@ class AmapConfig:
     RESTAURANT_ADDRESS: str = os.getenv("RESTAURANT_ADDRESS", "北京市昌平区宏福科技园")
     MERCHANT_LONGITUDE: str = os.getenv("MERCHANT_LONGITUDE")
     MERCHANT_LATITUDE: str = os.getenv("MERCHANT_LATITUDE")
-    DELIVERY_RADIUS: int = int(os.getenv("DELIVERY_RADIUS"))
+    DELIVERY_RADIUS: int = int(os.getenv("DELIVERY_RADIUS", "10000"))
     DEFAULT_PATH_MODE = os.getenv("DEFAULT_PATH_MODE")
 
     def __post_init__(self):
