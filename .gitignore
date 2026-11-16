@@ -24,7 +24,16 @@ chroma_db/
 eval_result.json
 trae-sandbox/
 trae-preview/
+# 本地模型权重（本地 Rerank 等，体积大，不入库）
+models/
 logs/
+
+# Playwright
+ui/test-results/
+ui/playwright-report/
 docs/*
-# 简历文案需要随仓库走，其余 docs 仍不纳入版本管理
+# 简历文案、面试问答与开发文档需要随仓库走（README/简历里的链接要能打开）
 !docs/resume_bullets.md
+!docs/interview_qa.md
+!docs/development_log.md
+!docs/implementation_guide.md
