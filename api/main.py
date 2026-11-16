@@ -6,10 +6,12 @@
 2.2 POST /delivery - 配送查询接口
 2.3 GET /menu/list - 菜品列表接口
 """
-from  fastapi import  FastAPI, HTTPException, BackgroundTasks, Depends, status
+from  fastapi import  FastAPI, HTTPException, BackgroundTasks, Depends, Header, Query, Request, status
 from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List,Optional, Dict, Any
 from tools.amap_tool import PathInputModel
 from tools.auth_tool import (
@@ -17,11 +19,13 @@ from tools.auth_tool import (
 )
 from tools.db_tool import get_user_by_username, create_user
 from tools.redis_tool import cache
+from tools.observability import new_trace_id, set_trace_id, setup_logging, usage_snapshot
 import  logging
 import  os
+import  threading
 import  time
 
-logging.basicConfig(level=logging.INFO)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # OAuth2 配置
@@ -64,6 +68,12 @@ async def get_optional_user(token: str = Depends(oauth2_scheme)) -> Optional[dic
 
 # 对话接口限流：每个用户每分钟最多 N 次，0 表示关闭
 CHAT_RATE_LIMIT_PER_MINUTE = int(os.getenv("CHAT_RATE_LIMIT_PER_MINUTE", "20"))
+# 登录限流：同一「用户名 + 客户端 IP」每分钟最多尝试次数，防撞库/爆破；0 表示关闭
+LOGIN_RATE_LIMIT_PER_MINUTE = int(os.getenv("LOGIN_RATE_LIMIT_PER_MINUTE", "20"))
+# 跨域白名单：前后端分开部署时按需配置（逗号分隔）；留空表示只允许同源
+CORS_ALLOW_ORIGINS = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "").split(",") if o.strip()]
+# 单次请求体上限，避免超大 JSON 占内存
+MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_BYTES", str(1024 * 1024)))
 
 
 async def get_chat_user(current_user: dict = Depends(get_current_user)) -> dict:
@@ -92,6 +102,59 @@ def send_notification(order_no: str):
     logger.info(f"订单 {order_no} 通知推送成功！")
 
 app=FastAPI(title="智能点餐助手的API接口",description="智能点餐应用主要暴露三个接口分别为智能对话接口、配送查询接口、菜品列表接口")
+
+
+@app.middleware("http")
+async def trace_middleware(request, call_next):
+    """把一次请求内所有日志串到同一个 trace_id 上
+
+    优先复用上游传入的 X-Trace-ID（便于和网关/前端日志对齐），没有就新建，
+    并回写到响应头，出问题时可以直接拿这个 ID 去搜日志。
+    """
+    trace_id = request.headers.get("X-Trace-ID") or new_trace_id()
+    set_trace_id(trace_id)
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        duration_ms = (time.perf_counter() - started) * 1000
+        logger.exception("http_request 失败 path=%s duration_ms=%.1f error=%s",
+                         request.url.path, duration_ms, exc)
+        raise
+    duration_ms = (time.perf_counter() - started) * 1000
+    response.headers["X-Trace-ID"] = trace_id
+    logger.info("http_request method=%s path=%s status=%s duration_ms=%.1f",
+                request.method, request.url.path, response.status_code, duration_ms)
+    return response
+
+
+if CORS_ALLOW_ORIGINS:
+    # 默认只允许同源（前端经 Vite/Nginx 代理访问）；分域部署时由 CORS_ALLOW_ORIGINS 显式放行
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ALLOW_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+
+@app.middleware("http")
+async def security_middleware(request, call_next):
+    """基础安全响应头 + 请求体大小限制
+
+    API 不输出 HTML，但仍拒绝被 iframe 嵌套与内容类型嗅探；
+    体积上限先于路由/鉴权判断，避免超大请求占用内存。
+    """
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > MAX_REQUEST_BODY_BYTES:
+        return JSONResponse(status_code=413, content={"detail": "请求体过大"})
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    return response
+
 
 @app.on_event("startup")
 async def startup_event():
@@ -128,15 +191,15 @@ def  healthy():
 # 定义配送范围查询的请求模型
 class DeliveryRequest(BaseModel):
     """配送范围查询请求"""
-    address: str
+    address: str = Field(..., min_length=1, max_length=120)
     travel_mode: PathInputModel = "2"  # 1=步行, 2=骑电动车, 3=驾车
 
 
 # 定义对话的请求模型
 class ChatRequest(BaseModel):
-    """智能对话请求"""
-    query: str
-    session_id: Optional[str] = "default"
+    """智能对话请求（限制长度，避免超长输入把 LLM 成本与延迟放大）"""
+    query: str = Field(..., max_length=500)
+    session_id: Optional[str] = Field(default="default", max_length=64)
 
 
 
@@ -185,10 +248,10 @@ class RestaurantInfoResponse(BaseModel):
 
 # 定义订单项模型
 class OrderItem(BaseModel):
-    id: int
-    dish_name: str
-    price: float
-    quantity: int
+    id: int = Field(..., ge=1)
+    dish_name: str = Field(..., max_length=100)
+    price: float = Field(..., ge=0)
+    quantity: int = Field(..., ge=1, le=99)
 
 # 定义提交订单请求模型
 # total_amount / delivery_fee / actual_amount 仅用于展示，服务端会依据数据库价格与配送距离重新计算
@@ -196,9 +259,9 @@ class OrderSubmitRequest(BaseModel):
     total_amount: Optional[float] = None
     delivery_fee: Optional[float] = None
     actual_amount: Optional[float] = None
-    delivery_address: str
+    delivery_address: str = Field(..., min_length=1, max_length=200)
     travel_mode: PathInputModel = "2"
-    items_detail: List[OrderItem]
+    items_detail: List[OrderItem] = Field(..., min_length=1, max_length=50)
 
 # 定义通用操作响应模型
 class ActionResponse(BaseModel):
@@ -209,10 +272,10 @@ class ActionResponse(BaseModel):
 # ====================== 认证相关接口 ======================
 
 class UserRegister(BaseModel):
-    username: str
-    password: str
-    nickname: Optional[str] = None
-    phone: Optional[str] = None
+    username: str = Field(..., pattern=r"^[A-Za-z0-9_]{3,32}$")
+    password: str = Field(..., min_length=8, max_length=72)
+    nickname: Optional[str] = Field(default=None, max_length=32)
+    phone: Optional[str] = Field(default=None, max_length=20)
 
 class Token(BaseModel):
     access_token: str
@@ -220,10 +283,17 @@ class Token(BaseModel):
     username: str
     nickname: str
 
+_DUMMY_PASSWORD_HASH = get_password_hash("aimenu-dummy-password-for-timing")
+
+
 def _authenticate(username: str, password: str) -> Optional[dict]:
     """账号密码校验（bcrypt 校验是 CPU 密集操作，放到线程池执行）"""
     user = get_user_by_username(username)
-    if not user or not verify_password(password, user['password_hash']):
+    if not user:
+        # 用户不存在也跑一次 bcrypt，抹平「账号是否存在」的响应耗时差异
+        verify_password(password, _DUMMY_PASSWORD_HASH)
+        return None
+    if not verify_password(password, user['password_hash']):
         return None
     return user
 
@@ -247,8 +317,20 @@ async def register(user_in: UserRegister):
     return ActionResponse(success=False, message="注册失败，请稍后再试")
 
 @app.post("/auth/login", response_model=Token)
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    """用户登录"""
+async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
+    """用户登录（按「用户名 + IP」限流，防撞库与暴力破解）"""
+    if LOGIN_RATE_LIMIT_PER_MINUTE > 0:
+        window = int(time.time() // 60)
+        client_ip = request.client.host if request.client else "unknown"
+        key = f"aimenu:ratelimit:login:{form_data.username}:{client_ip}:{window}"
+        count = cache.incr_with_ttl(key, expire=70)
+        if count is not None and count > LOGIN_RATE_LIMIT_PER_MINUTE:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="登录尝试过于频繁，请稍后再试",
+                headers={"Retry-After": "60"},
+            )
+
     user = await run_in_threadpool(_authenticate, form_data.username, form_data.password)
     if not user:
         raise HTTPException(
@@ -265,6 +347,17 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
         "nickname": user['nickname'] or user['username']
     }
 
+@app.get("/metrics/cost")
+async def cost_metrics(current_user: dict = Depends(get_current_user)):
+    """LLM 成本面板：进程内累计的调用次数与 token 用量
+
+    只统计当前 worker 进程，多 worker 部署时需要用 /metrics 聚合，
+    或在网关侧汇总；单价由 COST_INPUT_PER_1K / COST_OUTPUT_PER_1K 配置，
+    未配置时不估算金额（返回 null），避免用假价格糊弄。
+    """
+    return {"success": True, "usage": usage_snapshot()}
+
+
 @app.get("/auth/me")
 async def get_me(current_user: dict = Depends(get_current_user)):
     """获取当前用户信息"""
@@ -278,7 +371,10 @@ async def get_me(current_user: dict = Depends(get_current_user)):
 # ====================== 业务逻辑接口 ======================
 
 @app.get("/delivery/tips")
-def delivery_tips_endpoint(keywords: str, current_user: dict = Depends(get_current_user)):
+def delivery_tips_endpoint(
+    keywords: str = Query(..., min_length=1, max_length=50),
+    current_user: dict = Depends(get_current_user)
+):
     """获取地址输入建议 (需要登录)；同步 HTTP 调用，交给 FastAPI 线程池执行"""
     from tools.amap_tool import get_input_tips
     return get_input_tips(keywords)

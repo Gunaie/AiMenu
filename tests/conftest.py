@@ -15,3 +15,5 @@ os.environ.setdefault("MERCHANT_LATITUDE", "30.466352")
 os.environ.setdefault("DASHSCOPE_API_KEY", "test-dashscope-key")
 os.environ.setdefault("DASHSCOPE_MODEL_NAME", "qwen-plus")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret")
+# 测试里显式放行一个跨域来源，便于验证 CORS 预检；生产默认留空（只允许同源）
+os.environ.setdefault("CORS_ALLOW_ORIGINS", "http://localhost:3000")
