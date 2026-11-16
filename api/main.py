@@ -174,6 +174,46 @@ async def startup_event():
     except Exception as e:
         logger.error(f"启动时检查向量数据库失败: {e}")
 
+    _warmup_rerank_in_background()
+    _warmup_agent_in_background()
+
+
+def _warmup_agent_in_background():
+    """首个对话请求还要承担 LangChain / LangGraph 的模块导入与 Agent 构建（实测 ~17s）
+
+    接口里保留懒导入，这里在后台线程提前触发一次，避免第一位用户被卡住。
+    """
+    def _warmup():
+        try:
+            started = time.perf_counter()
+            from agent.assistant import chat_with_assistant_stream  # noqa: F401
+            logger.info("Agent 模块预热完成，耗时 %.1fs", time.perf_counter() - started)
+        except Exception as exc:
+            logger.warning("Agent 模块预热失败，将在首次对话时重试: %s", exc)
+
+    threading.Thread(target=_warmup, name="agent-warmup", daemon=True).start()
+
+
+def _warmup_rerank_in_background():
+    """本地 Rerank 权重加载需要十几秒到一分钟，放后台线程预热
+
+    否则第一个检索请求要自己承担冷启动，实测首次对话被拖慢 100s+。
+    云端 Rerank 是一次 HTTP 调用，不需要预热。
+    """
+    if os.getenv("RERANK_PROVIDER", "dashscope").strip().lower() != "local":
+        return
+    if os.getenv("USE_RERANK", "true").lower() != "true":
+        return
+
+    def _warmup():
+        try:
+            from tools.local_reranker import get_local_reranker
+            get_local_reranker().warmup()
+        except Exception as exc:
+            logger.warning("本地 Rerank 预热异常: %s", exc)
+
+    threading.Thread(target=_warmup, name="rerank-warmup", daemon=True).start()
+
 
 
 @app.get("/")

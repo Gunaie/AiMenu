@@ -6,6 +6,7 @@
 import logging
 import os
 import threading
+import time
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,30 @@ class LocalReranker:
             )
             logger.info("本地 Rerank 模型加载完成")
             return self._model
+
+    def warmup(self) -> bool:
+        """预加载权重，避免第一个检索请求承担冷启动（实测首次对话会被拖慢 100s+）
+
+        预热失败不抛出：真正检索时会再尝试一次，仍失败则按既有逻辑降级为融合排序。
+        """
+        if self._model is not None:
+            return True
+        try:
+            started = time.perf_counter()
+            self._load()
+            loaded_at = time.perf_counter()
+            # 只加载权重不够：第一次推理还要初始化 torch 线程池与算子，实测多花 5~7s，
+            # 因此这里跑一次最小批量的真实推理，把首次请求的「首推理」开销也挪到启动阶段。
+            self.rerank("预热查询", ["菜品名称：番茄蛋汤 分类：汤类"])
+            logger.info(
+                "本地 Rerank 预热完成，加载 %.1fs + 首推理 %.1fs",
+                loaded_at - started,
+                time.perf_counter() - loaded_at,
+            )
+            return True
+        except Exception as exc:
+            logger.warning("本地 Rerank 预热失败，将在首次检索时重试: %s", exc)
+            return False
 
     def rerank(self, query: str, documents: List[str]) -> List[float]:
         """返回与 documents 顺序一致的 0~1 相关度分数"""
