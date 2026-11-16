@@ -21,7 +21,7 @@
           <span>总计:</span>
           <span class="total-amount">¥{{ cart.totalPrice }}</span>
         </div>
-        <el-button type="primary" class="checkout-btn" @click="order.checkout">提交订单</el-button>
+        <el-button type="primary" class="checkout-btn" @click="order.checkout" :loading="order.submitting">提交订单</el-button>
       </div>
       <el-empty v-else description="购物车还是空的" />
     </div>

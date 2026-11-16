@@ -10,6 +10,13 @@ export const useOrderStore = defineStore('order', () => {
   const showOrders = ref(false)
   const ordersList = ref([])
   const ordersLoading = ref(false)
+  // 下单进行中标记：拦截重复点击，避免同一份购物车生成多笔订单
+  const submitting = ref(false)
+
+  const buildIdempotencyKey = () =>
+    (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `order-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 
   const openOrders = () => {
     showOrders.value = true
@@ -93,6 +100,9 @@ export const useOrderStore = defineStore('order', () => {
     const cart = useCartStore()
     const delivery = useDeliveryStore()
 
+    // 重复点击直接忽略：从确认弹窗到支付提示之间都不允许再发起一次下单
+    if (submitting.value) return
+
     // 下单拦截机制：强制配送范围校验
     if (!delivery.deliveryResponse) {
       ElMessage.warning('请先设置并校验配送地址')
@@ -107,6 +117,7 @@ export const useOrderStore = defineStore('order', () => {
 
     const totalWithDelivery = (parseFloat(cart.totalPrice) + (delivery.deliveryResponse.delivery_fee || 0)).toFixed(2)
 
+    submitting.value = true
     try {
       await ElMessageBox.confirm(
         `确认下单吗？\n菜品：¥${cart.totalPrice}\n配送费：¥${delivery.deliveryResponse.delivery_fee}\n总计金额：¥${totalWithDelivery}`,
@@ -130,8 +141,13 @@ export const useOrderStore = defineStore('order', () => {
         }))
       }
 
-      const res = await orderAPI.submitOrder(orderData)
-      loading.close()
+      let res
+      try {
+        // 一次下单流程只用一个幂等键：即使请求被重复发出，后端也只落一笔订单
+        res = await orderAPI.submitOrder(orderData, buildIdempotencyKey())
+      } finally {
+        loading.close()
+      }
 
       if (res.success) {
         const orderNo = res.order_no
@@ -150,6 +166,8 @@ export const useOrderStore = defineStore('order', () => {
         console.error('下单流程失败:', error)
         ElMessage.error('系统繁忙，请稍后再试')
       }
+    } finally {
+      submitting.value = false
     }
   }
 
@@ -158,7 +176,7 @@ export const useOrderStore = defineStore('order', () => {
   }
 
   return {
-    showOrders, ordersList, ordersLoading,
+    showOrders, ordersList, ordersLoading, submitting,
     openOrders, loadOrders, checkout, handlePayment,
     getOrderStatusTag, getOrderStatusText, formatDate, reset
   }

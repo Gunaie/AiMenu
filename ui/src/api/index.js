@@ -173,9 +173,10 @@ export const restaurantAPI = {
 
 // 订单API
 export const orderAPI = {
-  // 提交订单
-  submitOrder: async (orderData) => {
-    return await api.post('/order/submit', orderData)
+  // 提交订单；idempotencyKey 透传给后端，网络重试或重复点击不会生成第二笔订单
+  submitOrder: async (orderData, idempotencyKey) => {
+    const config = idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : undefined
+    return await api.post('/order/submit', orderData, config)
   },
   // 模拟支付
   payOrder: async (orderNo) => {
