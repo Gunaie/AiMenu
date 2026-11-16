@@ -81,11 +81,19 @@ jobs:
       - name: Install dependencies
         if: env.DASHSCOPE_API_KEY != ''
         run: pip install -r requirements.txt
+      - name: Install local rerank dependencies
+        if: env.DASHSCOPE_API_KEY != ''
+        run: pip install -r requirements-local-rerank.txt
       - name: Prepare .env
         if: env.DASHSCOPE_API_KEY != ''
         run: |
           cp .env.example .env
           sed -i "s#^DASHSCOPE_API_KEY=.*#DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}#" .env
+          # 与 data/eval_baseline.json 保持同一配置，否则基线对比无意义
+          sed -i "s#^EMBEDDING_MODEL=.*#EMBEDDING_MODEL=text-embedding-v3#" .env
+          sed -i "s#^EMBEDDING_DIM=.*#EMBEDDING_DIM=1024#" .env
+          sed -i "s#^RERANK_PROVIDER=.*#RERANK_PROVIDER=local#" .env
+          sed -i "s#^RETRIEVAL_MIN_SCORE=.*#RETRIEVAL_MIN_SCORE=0.115#" .env
       - name: Initialize menu and vectors
         if: env.DASHSCOPE_API_KEY != ''
         run: python setup_db.py
@@ -100,6 +108,16 @@ jobs:
         run: |
           python scripts/eval_agent.py --min-tool-accuracy 0.8 --no-judge \
             --json agent_eval.json
+      - name: Export failure cases
+        if: env.DASHSCOPE_API_KEY != ''
+        run: |
+          python scripts/export_failure_cases.py --rag eval_result.json \
+            --agent agent_eval.json --out eval_failure_cases.json
+      - name: Check agent guardrail regression
+        if: env.DASHSCOPE_API_KEY != ''
+        run: |
+          python scripts/check_eval_regression.py --result agent_eval.json \
+            --baseline data/eval_agent_full_qwen35.json --max-drop 0.05
       - name: Upload eval reports
         if: always()
         uses: actions/upload-artifact@v7
@@ -108,4 +126,5 @@ jobs:
           path: |
             eval_result.json
             agent_eval.json
+            eval_failure_cases.json
           if-no-files-found: ignore
