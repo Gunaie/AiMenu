@@ -13,6 +13,7 @@ from langgraph.prebuilt import ToolNode
 
 # 导入自定义工具
 from agent.tools import restaurant_tools
+from tools.observability import record_usage
 from agent.session_memory import RedisSessionMemory
 
 logger = logging.getLogger(__name__)
@@ -20,17 +21,30 @@ logger = logging.getLogger(__name__)
 # 会话级槽位名：记录本会话已确认过的配送地址，供后续「那配送费多少」这类追问复用
 DELIVERY_ADDRESS_SLOT = "delivery_address"
 
+# 确定性输入护栏：在进入 LLM 之前拦掉两类请求，不依赖模型自觉
+# 1) 只有标点/空白，没有任何文字或数字（模型容易自说自话编菜品）
+MEANINGLESS_QUERY_RE = re.compile(r"^[\W_]+$")
+# 2) 索要他人/全部用户订单或隐私信息（越权类请求）
+PRIVILEGE_QUERY_PATTERNS = (
+    re.compile(r"(所有|全部|其他|其它|他人|别人).{0,8}(用户|客官|顾客|客人|人)?.{0,8}(订单|单号|信息|密码|手机号|地址)"),
+    re.compile(r"(用户|客官|顾客|客人).{0,6}(密码|身份证|手机号)"),
+    # 第三人称持有：他的订单 / 她手机号 / 对方住址（不含「他家地址能送到吗」这类正常配送问题）
+    re.compile(r"(他|她|ta|TA|对方|那个人).{0,6}(订单|单号|手机号|电话|密码|身份证|住址)"),
+)
+
 # 定义 Agent 状态
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
     menu_ids: List[str]   # 推荐的菜品ID（用于前端高亮）
     final_response: str   # 最终聚合的回复内容
     user_info: Optional[Dict[str, Any]] # 当前用户信息
+    guard_blocked: bool   # 是否被确定性输入护栏拦截（拦截时不进入 LLM/工具）
 
 class SmartRestaurantGraph:
-    def __init__(self):
+    def __init__(self, model_name: Optional[str] = None):
         self.dashscope_api_key = os.getenv("DASHSCOPE_API_KEY")
-        self.model_name = os.getenv("DASHSCOPE_MODEL_NAME", "qwen-plus")
+        # 允许显式指定模型：评测做 A/B 时用独立实例，不受各工具模块 load_dotenv 的影响
+        self.model_name = model_name or os.getenv("DASHSCOPE_MODEL_NAME", "qwen-plus")
         self.api_base = os.getenv("DASHSCOPE_API_BASE", "https://dashscope.aliyuncs.com/compatible-mode/v1/")
         
         # 核心 LLM
@@ -68,11 +82,20 @@ class SmartRestaurantGraph:
         graph = StateGraph(AgentState)
         
         # 添加节点
+        graph.add_node("guard", self._input_guard)
         graph.add_node("agent", self.call_model)
         graph.add_node("tools", self._run_tools)
         
-        # 设置入口
-        graph.set_entry_point("agent")
+        # 设置入口：所有请求先过确定性护栏，再交给模型
+        graph.set_entry_point("guard")
+        graph.add_conditional_edges(
+            "guard",
+            self._after_guard,
+            {
+                "continue": "agent",
+                "blocked": END
+            }
+        )
         
         # 条件边：根据 LLM 是否调用工具来决定下一步
         graph.add_conditional_edges(
@@ -88,6 +111,48 @@ class SmartRestaurantGraph:
         graph.add_edge("tools", "agent")
         
         return graph
+
+    @staticmethod
+    def _input_guard(state: AgentState):
+        """进入 LLM 前的确定性护栏：空输入/纯标点、越权索要他人订单直接拒答
+
+        这类请求靠提示词约束并不可靠（评测里就出现过越权请求照样调了 query_order），
+        所以放在图入口用规则拦掉：既省一次 LLM 调用，也保证行为稳定可测。
+        """
+        query = ""
+        for message in reversed(state.get("messages", [])):
+            if isinstance(message, HumanMessage):
+                query = message.content if isinstance(message.content, str) else ""
+                break
+
+        text = (query or "").strip()
+        reply = None
+        if not text or MEANINGLESS_QUERY_RE.match(text):
+            reply = (
+                "抱歉客官，小二没太看明白您的意思～您是想吃点什么，还是想查订单、问配送？"
+                "直接跟小二说一声就行。"
+            )
+        elif any(pattern.search(text) for pattern in PRIVILEGE_QUERY_PATTERNS):
+            reply = (
+                "抱歉客官，小二只能帮您查您自己的订单，其他客官的订单和账号信息是不能提供、也不会展示的。"
+                "您把单号告诉小二，小二马上帮您查。"
+            )
+
+        if reply:
+            logger.info(f"输入护栏拦截：{text[:30] or '<空输入>'}")
+            return {
+                "messages": [AIMessage(content=reply)],
+                "final_response": reply,
+                "menu_ids": [],
+                "guard_blocked": True,
+            }
+        return {"guard_blocked": False}
+
+    @staticmethod
+    def _after_guard(state: AgentState):
+        """护栏命中则直接结束，否则进入正常的 Agent 流程"""
+        return "blocked" if state.get("guard_blocked") else "continue"
+
 
     def should_continue(self, state: AgentState):
         """判断是否需要继续调用工具"""
@@ -215,6 +280,8 @@ class SmartRestaurantGraph:
 5. **菜品高亮**：当你向客官推荐或提到具体菜品时，请务必直接说出【参考数据】中的完整菜名。
 6. **逻辑闭环**：如果获取到的数据为空或失败，如实告知客官并提供备选建议。
 7. **无答案拒答**：`search_menu` 返回 `answerable: false` 时，说明菜单中没有相关菜品（例如客官问帝王蟹、松露），必须如实说明"小店暂时没有这道菜"，可推荐相近菜品，绝不能编造菜品或硬推不相关的结果。
+8. **权限边界**：只能查询当前登录客官本人的订单。若客官索要他人或"全部用户"的订单、账号密码、手机号等隐私信息，
+   必须明确拒绝，且不要调用 `query_order`，更不能编造数据。
 """
         
         # 针对 Tool Calling 注入 user_id
@@ -252,6 +319,7 @@ class SmartRestaurantGraph:
         logger.info(f"LangGraph Node: agent - Done, duration: {time.time()-start_t:.4f}s")
         usage = getattr(response, "usage_metadata", None) or {}
         if usage:
+            record_usage(self.model_name, usage)
             logger.info(
                 "LLM token usage: model=%s prompt=%s completion=%s total=%s",
                 self.model_name,
@@ -280,6 +348,8 @@ class SmartRestaurantGraph:
         
         logger.info(f"LangGraph (Tool-Calling) astream_run start: {user_query} (user: {user_info.get('username') if user_info else 'Guest'}, history: {len(history)})")
         answer_parts: List[str] = []
+        usage_totals = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        final_state: Dict[str, Any] = {}
         
         try:
             async for event in self.app.astream_events(
@@ -300,13 +370,24 @@ class SmartRestaurantGraph:
                             answer_parts.append(content)
                             yield {"type": "content", "content": content}
                 
-                # 2. 处理元数据 (菜品 ID)
+                # 2. 汇总 token 用量（流式也要能统计成本），结束时随 SSE 一起下发
+                elif kind == "on_chat_model_end":
+                    output = event["data"].get("output")
+                    usage = getattr(output, "usage_metadata", None) or {}
+                    if usage:
+                        usage_totals["calls"] += 1
+                        usage_totals["input_tokens"] += int(usage.get("input_tokens") or 0)
+                        usage_totals["output_tokens"] += int(usage.get("output_tokens") or 0)
+                        usage_totals["total_tokens"] += int(usage.get("total_tokens") or 0)
+
+                # 3. 处理元数据 (菜品 ID)
                 elif kind == "on_chain_end":
                     if event["name"] == "LangGraph":
                         try:
-                            final_state = event["data"].get("output")
-                            if isinstance(final_state, dict) and "menu_ids" in final_state:
-                                menu_ids = final_state["menu_ids"]
+                            output = event["data"].get("output")
+                            if isinstance(output, dict):
+                                final_state = output
+                                menu_ids = output.get("menu_ids") or []
                                 if menu_ids:
                                     logger.info(f"LangGraph astream_run - Yielding menu_ids: {menu_ids}")
                                     yield {"type": "metadata", "menu_ids": menu_ids}
@@ -317,6 +398,15 @@ class SmartRestaurantGraph:
             logger.error(f"LangGraph astream_run error: {e}")
             yield {"type": "error", "content": f"小二忙不过来了，请客官稍后再试。(错误详情: {str(e)})"}
         else:
+            # 被输入护栏拦截时没有 LLM 流式输出，这里补发整段回复，避免前端空白
+            if not answer_parts and final_state.get("guard_blocked"):
+                guarded_reply = final_state.get("final_response") or ""
+                if guarded_reply:
+                    answer_parts.append(guarded_reply)
+                    yield {"type": "content", "content": guarded_reply}
+            if usage_totals["total_tokens"]:
+                # 成本已在 _call_llm 里按模型调用逐笔记账，这里只把汇总下发给前端
+                yield {"type": "usage", "usage": usage_totals}
             # 只有完整跑完的轮次才写入记忆，避免把半截回复固化
             self.memory_store.append_turn(session_id, user_query, "".join(answer_parts), user_id=user_id)
 
